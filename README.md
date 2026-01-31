@@ -112,3 +112,48 @@ from typing import ClassVar
 class CustomEvent(Event):
     event_name: ClassVar[str] = "my_custom_event"
 ```
+
+## Union Return Types
+You might want to return `Response|ErrorResponse` from an event handler.
+
+> [!NOTE]
+> If your responses share fields, it is recommended to add a discriminator field to avoid ambiguity.
+
+
+```python
+class ProblemDetail(BaseModel):
+    """RFC 9457 Problem Details.
+
+    https://www.rfc-editor.org/rfc/rfc9457.html
+    """
+    kind: Literal["error"] = "error" # The discriminator (nod needed in this example)
+    type: str = "about:blank"
+    title: str
+    status: int
+    detail: str | None = None
+    instance: str | None = None
+
+class Response(BaseModel):
+    kind: Literal["response"] = "response" # The discriminator (not needed in this example)
+    data: str
+
+class ServerRequest(Event[Response | ProblemDetail]):
+    query: str
+
+@ServerRequest.on(sio)
+def handle_request(data: ServerRequest) -> Response | ProblemDetail:
+    if data.query == "bad":
+        return ProblemDetail(
+            title="Bad Request",
+            status=400,
+            detail="The request was invalid.",
+        )
+    return Response(data="Here is your data!")
+
+request = ServerRequest(query="<my-query-string>")
+response = await request.call(sio)
+if isinstance(response, ProblemDetail):
+    print(f"Error: {response.title} - {response.detail}")
+else:
+    print(f"Success: {response.data}")
+```
