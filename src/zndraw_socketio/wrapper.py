@@ -84,17 +84,110 @@ class EventContext:
     sio: "AsyncServerWrapper"
 
 
-@dataclass
 class SioRequest:
-    """Minimal Request-compatible shim for Socket.IO dependency injection.
+    """Request-compatible shim for Socket.IO dependency injection.
 
-    Provides ``request.app`` access so that FastAPI-style dependencies
-    like ``def get_db(request: Request)`` can be reused in Socket.IO
-    handlers. Unsupported Request attributes (url, headers, etc.)
-    raise ``AttributeError`` naturally.
+    Exposes a subset of the Starlette ``Request`` interface so that
+    FastAPI-style dependencies (``def get_db(request: Request)``) can be
+    reused in Socket.IO handlers without modification.
+
+    Available attributes (when ``environ`` is provided):
+        app, headers, client, url, cookies, query_params, scope, state, auth
+
+    When constructed without ``environ`` (e.g. for non-server wrappers),
+    only ``app`` is available; all other properties return ``None`` (or
+    ``{}`` for cookies).
     """
 
-    app: Any
+    __slots__ = ("app", "_environ", "auth")
+
+    def __init__(
+        self,
+        app: Any,
+        environ: dict[str, Any] | None = None,
+        auth: Any = None,
+    ) -> None:
+        self.app = app
+        self._environ = environ
+        self.auth = auth
+
+    def _scope(self) -> dict[str, Any] | None:
+        if self._environ is None:
+            return None
+        return self._environ.get("asgi.scope")
+
+    @property
+    def scope(self) -> dict[str, Any] | None:
+        """The raw ASGI scope dict, or ``None``."""
+        return self._scope()
+
+    @property
+    def headers(self) -> Any:
+        """Starlette ``Headers`` built from ASGI scope, or ``None``."""
+        scope = self._scope()
+        if scope is None:
+            return None
+        from starlette.datastructures import Headers
+
+        return Headers(raw=scope.get("headers", []))
+
+    @property
+    def client(self) -> Any:
+        """Starlette ``Address`` (host, port) or ``None``."""
+        scope = self._scope()
+        if scope is None:
+            return None
+        client = scope.get("client")
+        if client is None:
+            return None
+        from starlette.datastructures import Address
+
+        return Address(*client)
+
+    @property
+    def url(self) -> Any:
+        """Starlette ``URL`` reconstructed from environ, or ``None``."""
+        if self._environ is None:
+            return None
+        scope = self._scope()
+        scheme = scope.get("scheme", "http") if scope else "http"
+        host = self._environ.get("HTTP_HOST", "localhost")
+        raw_uri = self._environ.get("RAW_URI", "/")
+        from starlette.datastructures import URL
+
+        return URL(f"{scheme}://{host}{raw_uri}")
+
+    @property
+    def cookies(self) -> dict[str, str]:
+        """Parsed cookies from ``HTTP_COOKIE`` header."""
+        if self._environ is None:
+            return {}
+        raw = self._environ.get("HTTP_COOKIE")
+        if not raw:
+            return {}
+        from http.cookies import SimpleCookie
+
+        cookie = SimpleCookie(raw)
+        return {k: v.value for k, v in cookie.items()}
+
+    @property
+    def query_params(self) -> Any:
+        """Starlette ``QueryParams`` from query string, or ``None``."""
+        if self._environ is None:
+            return None
+        from starlette.datastructures import QueryParams
+
+        return QueryParams(self._environ.get("QUERY_STRING", ""))
+
+    @property
+    def state(self) -> Any:
+        """Starlette ``State`` from ASGI scope, or ``None``."""
+        scope = self._scope()
+        if scope is None:
+            return None
+        from starlette.datastructures import State
+
+        return State(scope.get("state", {}))
 
 
 # =============================================================================
@@ -222,6 +315,7 @@ async def _resolve_dependencies(
     deps: dict[str, Callable],
     *,
     app: Any = None,
+    environ: dict[str, Any] | None = None,
     stack: AsyncExitStack,
 ) -> dict[str, Any]:
     """Resolve dependency callables into their values.
@@ -237,6 +331,7 @@ async def _resolve_dependencies(
     Args:
         deps: Dict mapping parameter name to dependency callable.
         app: Optional FastAPI app instance for Request injection.
+        environ: Optional ASGI environ dict from ``sio.get_environ(sid)``.
         stack: AsyncExitStack for managing generator dependency lifecycle.
 
     Returns:
@@ -250,7 +345,7 @@ async def _resolve_dependencies(
         if Request is not None:
             for pname, param in inspect.signature(dep_fn).parameters.items():
                 if param.annotation is Request:
-                    kwargs[pname] = SioRequest(app=app)
+                    kwargs[pname] = SioRequest(app=app, environ=environ)
 
         if asyncio.iscoroutinefunction(dep_fn):
             resolved[name] = await dep_fn(**kwargs)
@@ -267,7 +362,10 @@ async def _resolve_dependencies(
 
 
 def _create_async_handler_wrapper(
-    handler: Callable, *, app_getter: Callable[[], Any] | None = None
+    handler: Callable,
+    *,
+    app_getter: Callable[[], Any] | None = None,
+    environ_getter: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> Callable:
     """Wrap async handler with Pydantic validation, DI, and serialization.
 
@@ -281,6 +379,10 @@ def _create_async_handler_wrapper(
         app_getter: Optional callable that returns the FastAPI app at event
             time. Defers app resolution so that handlers registered before
             the app exists still work.
+        environ_getter: Optional ``(sid) -> environ`` callable.  When
+            provided, the handler's first positional arg is treated as
+            ``sid`` and used to retrieve the ASGI environ dict for
+            ``SioRequest``.
 
     Returns:
         Wrapped async handler with validation and dependency injection.
@@ -293,7 +395,12 @@ def _create_async_handler_wrapper(
         async def _dep_handler(*args: Any, **kwargs: Any) -> Any:
             async with AsyncExitStack() as stack:
                 app = app_getter() if app_getter is not None else None
-                resolved = await _resolve_dependencies(deps, app=app, stack=stack)
+                environ = None
+                if environ_getter is not None and args:
+                    environ = environ_getter(args[0])  # args[0] is sid
+                resolved = await _resolve_dependencies(
+                    deps, app=app, environ=environ, stack=stack
+                )
                 kwargs.update(resolved)
                 return await handler(*args, **kwargs)
 
@@ -826,7 +933,9 @@ class AsyncServerWrapper:
         def decorator(handler: Callable) -> Callable:
             # Wrap with validation
             validated_wrapped = _create_async_handler_wrapper(
-                handler, app_getter=lambda: self._app
+                handler,
+                app_getter=lambda: self._app,
+                environ_getter=lambda sid: self._sio.get_environ(sid, namespace),
             )
 
             # Add exception handling wrapper
@@ -874,7 +983,9 @@ class AsyncServerWrapper:
             event_name = handler.__name__
             # Wrap with validation
             validated_wrapped = _create_async_handler_wrapper(
-                handler, app_getter=lambda: self._app
+                handler,
+                app_getter=lambda: self._app,
+                environ_getter=lambda sid: self._sio.get_environ(sid, namespace),
             )
 
             # Add exception handling wrapper

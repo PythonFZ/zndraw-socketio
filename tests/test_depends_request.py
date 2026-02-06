@@ -31,25 +31,175 @@ class FakeApp:
     state: FakeState = field(default_factory=FakeState)
 
 
+def _make_environ(
+    *,
+    host: str = "127.0.0.1:8000",
+    client: tuple[str, int] = ("192.168.1.10", 54321),
+    path: str = "/socket.io/",
+    query_string: str = "transport=polling&EIO=4",
+    scheme: str = "http",
+    cookie: str | None = None,
+) -> dict:
+    """Build a minimal environ dict matching what python-socketio provides in ASGI mode."""
+    raw_headers: list[tuple[bytes, bytes]] = [
+        (b"host", host.encode()),
+        (b"user-agent", b"TestClient/1.0"),
+    ]
+    if cookie:
+        raw_headers.append((b"cookie", cookie.encode()))
+    return {
+        "REQUEST_METHOD": "GET",
+        "PATH_INFO": path,
+        "QUERY_STRING": query_string,
+        "RAW_URI": f"{path}?{query_string}",
+        "HTTP_HOST": host,
+        "HTTP_USER_AGENT": "TestClient/1.0",
+        **({"HTTP_COOKIE": cookie} if cookie else {}),
+        "asgi.scope": {
+            "type": "http",
+            "scheme": scheme,
+            "server": tuple(host.split(":")[0:1]) + (int(host.split(":")[-1]),),
+            "client": client,
+            "headers": raw_headers,
+            "query_string": query_string.encode(),
+            "path": path,
+            "state": {},
+        },
+    }
+
+
 def test_sio_request_exposes_app():
     """SioRequest.app returns the app instance."""
     app = FakeApp()
-    req = SioRequest(app=app)
+    req = SioRequest(app=app, environ=_make_environ())
     assert req.app is app
 
 
 def test_sio_request_app_state():
     """SioRequest.app.state is accessible."""
     app = FakeApp(state=FakeState(db_url="postgres://localhost/mydb"))
-    req = SioRequest(app=app)
+    req = SioRequest(app=app, environ=_make_environ())
     assert req.app.state.db_url == "postgres://localhost/mydb"
 
 
-def test_sio_request_no_url():
-    """Unsupported attrs raise AttributeError."""
+def test_sio_request_headers():
+    """SioRequest.headers returns Starlette Headers from ASGI scope."""
+    from starlette.datastructures import Headers
+
+    req = SioRequest(app=None, environ=_make_environ(host="example.com:443"))
+    assert isinstance(req.headers, Headers)
+    assert req.headers["host"] == "example.com:443"
+    assert req.headers["user-agent"] == "TestClient/1.0"
+
+
+def test_sio_request_client():
+    """SioRequest.client returns Address from ASGI scope."""
+    from starlette.datastructures import Address
+
+    req = SioRequest(app=None, environ=_make_environ(client=("10.0.0.1", 9999)))
+    assert isinstance(req.client, Address)
+    assert req.client.host == "10.0.0.1"
+    assert req.client.port == 9999
+
+
+def test_sio_request_client_none():
+    """SioRequest.client is None when scope has no client."""
+    environ = _make_environ()
+    environ["asgi.scope"]["client"] = None
+    req = SioRequest(app=None, environ=environ)
+    assert req.client is None
+
+
+def test_sio_request_url():
+    """SioRequest.url returns a URL built from environ."""
+    from starlette.datastructures import URL
+
+    req = SioRequest(
+        app=None,
+        environ=_make_environ(
+            scheme="https",
+            host="example.com:443",
+            path="/socket.io/",
+            query_string="transport=polling",
+        ),
+    )
+    assert isinstance(req.url, URL)
+    assert req.url.scheme == "https"
+    assert req.url.hostname == "example.com"
+    assert req.url.path == "/socket.io/"
+    assert req.url.query == "transport=polling"
+
+
+def test_sio_request_cookies():
+    """SioRequest.cookies parses cookies from environ."""
+    req = SioRequest(
+        app=None,
+        environ=_make_environ(cookie="session=abc123; theme=dark"),
+    )
+    assert req.cookies["session"] == "abc123"
+    assert req.cookies["theme"] == "dark"
+
+
+def test_sio_request_cookies_empty():
+    """SioRequest.cookies returns empty dict when no cookie header."""
+    req = SioRequest(app=None, environ=_make_environ())
+    assert req.cookies == {}
+
+
+def test_sio_request_query_params():
+    """SioRequest.query_params parses query string."""
+    from starlette.datastructures import QueryParams
+
+    req = SioRequest(
+        app=None,
+        environ=_make_environ(query_string="transport=polling&EIO=4"),
+    )
+    assert isinstance(req.query_params, QueryParams)
+    assert req.query_params["transport"] == "polling"
+    assert req.query_params["EIO"] == "4"
+
+
+def test_sio_request_scope():
+    """SioRequest.scope returns the raw ASGI scope dict."""
+    environ = _make_environ()
+    req = SioRequest(app=None, environ=environ)
+    assert req.scope is environ["asgi.scope"]
+
+
+def test_sio_request_state():
+    """SioRequest.state returns a mutable State namespace."""
+    from starlette.datastructures import State
+
+    req = SioRequest(app=None, environ=_make_environ())
+    assert isinstance(req.state, State)
+    req.state.foo = "bar"
+    assert req.state.foo == "bar"
+
+
+def test_sio_request_auth():
+    """SioRequest.auth stores the Socket.IO auth payload."""
+    req = SioRequest(app=None, environ=_make_environ(), auth={"token": "abc"})
+    assert req.auth == {"token": "abc"}
+
+
+def test_sio_request_auth_none():
+    """SioRequest.auth is None by default."""
+    req = SioRequest(app=None, environ=_make_environ())
+    assert req.auth is None
+
+
+def test_sio_request_no_environ():
+    """SioRequest works with just app (backwards compat / non-server use)."""
     req = SioRequest(app=FakeApp())
-    with pytest.raises(AttributeError):
-        _ = req.url  # type: ignore[attr-defined]
+    assert req.app is not None
+    assert req.headers is None
+    assert req.client is None
+    assert req.url is None
+    assert req.cookies == {}
+    assert req.query_params is None
+    assert req.scope is None
+    assert req.state is None
+    assert req.auth is None
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +362,76 @@ async def test_request_app_none_when_not_set():
 
 
 # ---------------------------------------------------------------------------
+# Integration tests: SioRequest environ fields in real handlers
+# ---------------------------------------------------------------------------
+
+
+class HostResponse(BaseModel):
+    host: str
+
+
+@pytest.mark.asyncio
+async def test_handler_can_read_request_headers(server_factory):
+    """Dependency accessing request.headers works in a real handler."""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
+
+    def get_host(request: Request) -> str:
+        return request.headers["host"]
+
+    @tsio.on(EchoRequest)
+    async def handle(
+        sid: str, data: EchoRequest, host: Annotated[str, Depends(get_host)]
+    ) -> HostResponse:
+        return HostResponse(host=host)
+
+    url = await server_factory(socketio.ASGIApp(tsio, app))
+    client = wrap(socketio.AsyncSimpleClient())
+    await client.connect(url)
+
+    resp = await client.call(EchoRequest(msg="x"), response_model=HostResponse)
+    # Host header should contain the server address
+    assert "127.0.0.1" in resp.host
+    await client.disconnect()
+
+
+class ClientResponse(BaseModel):
+    client_host: str
+
+
+@pytest.mark.asyncio
+async def test_handler_can_read_request_client(server_factory):
+    """Dependency accessing request.client works in a real handler."""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
+
+    def get_client_host(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    @tsio.on(EchoRequest)
+    async def handle(
+        sid: str,
+        data: EchoRequest,
+        client_host: Annotated[str, Depends(get_client_host)],
+    ) -> ClientResponse:
+        return ClientResponse(client_host=client_host)
+
+    url = await server_factory(socketio.ASGIApp(tsio, app))
+    client = wrap(socketio.AsyncSimpleClient())
+    await client.connect(url)
+
+    resp = await client.call(EchoRequest(msg="x"), response_model=ClientResponse)
+    assert resp.client_host == "127.0.0.1"
+    await client.disconnect()
+
+
+# ---------------------------------------------------------------------------
 # Integration tests: @tsio.on() with Request injection
 # ---------------------------------------------------------------------------
 
@@ -348,6 +568,41 @@ async def test_connect_handler_with_depends(server_factory):
     await asyncio.sleep(0.1)
 
     assert len(app.state.connections) == 1
+    await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_connect_handler_receives_environ_via_request(server_factory):
+    """connect handler dependency can read request.headers from environ."""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.state.hosts = []
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
+
+    def get_host(request: Request) -> str:
+        return request.headers["host"]
+
+    @tsio.on("connect")
+    async def on_connect(
+        sid: str,
+        environ: dict,
+        auth: dict | None = None,
+        host: str = Depends(get_host),
+    ) -> None:
+        app.state.hosts.append(host)
+
+    url = await server_factory(socketio.ASGIApp(tsio, app))
+    client = wrap(socketio.AsyncSimpleClient())
+    await client.connect(url)
+
+    import asyncio
+
+    await asyncio.sleep(0.1)
+
+    assert len(app.state.hosts) == 1
+    assert "127.0.0.1" in app.state.hosts[0]
     await client.disconnect()
 
 
