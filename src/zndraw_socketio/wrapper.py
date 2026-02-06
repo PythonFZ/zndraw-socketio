@@ -21,7 +21,6 @@ from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from typing import (
-    TYPE_CHECKING,
     Annotated,
     Any,
     Callable,
@@ -54,9 +53,6 @@ try:
     from fastapi import Request
 except ImportError:
     Request = None  # type: ignore[assignment, misc]
-
-if TYPE_CHECKING:
-    from fastapi import FastAPI
 
 T = TypeVar("T")
 
@@ -251,7 +247,7 @@ async def _resolve_dependencies(
     for name, dep_fn in deps.items():
         # Build kwargs: inject SioRequest for Request-typed params
         kwargs: dict[str, Any] = {}
-        if Request is not None and app is not None:
+        if Request is not None:
             for pname, param in inspect.signature(dep_fn).parameters.items():
                 if param.annotation is Request:
                     kwargs[pname] = SioRequest(app=app)
@@ -270,7 +266,9 @@ async def _resolve_dependencies(
     return resolved
 
 
-def _create_async_handler_wrapper(handler: Callable, *, app: Any = None) -> Callable:
+def _create_async_handler_wrapper(
+    handler: Callable, *, app_getter: Callable[[], Any] | None = None
+) -> Callable:
     """Wrap async handler with Pydantic validation, DI, and serialization.
 
     Uses pydantic's validate_call to validate input arguments and return value
@@ -280,7 +278,9 @@ def _create_async_handler_wrapper(handler: Callable, *, app: Any = None) -> Call
 
     Args:
         handler: The async event handler function.
-        app: Optional FastAPI app for Request injection in dependencies.
+        app_getter: Optional callable that returns the FastAPI app at event
+            time. Defers app resolution so that handlers registered before
+            the app exists still work.
 
     Returns:
         Wrapped async handler with validation and dependency injection.
@@ -292,6 +292,7 @@ def _create_async_handler_wrapper(handler: Callable, *, app: Any = None) -> Call
         @wraps(handler)
         async def _dep_handler(*args: Any, **kwargs: Any) -> Any:
             async with AsyncExitStack() as stack:
+                app = app_getter() if app_getter is not None else None
                 resolved = await _resolve_dependencies(deps, app=app, stack=stack)
                 kwargs.update(resolved)
                 return await handler(*args, **kwargs)
@@ -366,6 +367,15 @@ class AsyncClientWrapper:
             sio: The socketio AsyncClient to wrap.
         """
         self._sio = sio
+        self._app: Any = None
+
+    @property
+    def app(self) -> Any:
+        return self._app
+
+    @app.setter
+    def app(self, value: Any) -> None:
+        self._app = value
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
@@ -496,7 +506,9 @@ class AsyncClientWrapper:
             event_name = event
 
         def decorator(handler: Callable) -> Callable:
-            wrapped = _create_async_handler_wrapper(handler)
+            wrapped = _create_async_handler_wrapper(
+                handler, app_getter=lambda: self._app
+            )
             self._sio.on(event_name, wrapped, **kwargs)
             return handler
 
@@ -529,7 +541,9 @@ class AsyncClientWrapper:
 
         def decorator(handler: Callable) -> Callable:
             event_name = handler.__name__
-            wrapped = _create_async_handler_wrapper(handler)
+            wrapped = _create_async_handler_wrapper(
+                handler, app_getter=lambda: self._app
+            )
             self._sio.on(event_name, wrapped, **kwargs)
             return handler
 
@@ -577,20 +591,25 @@ class AsyncServerWrapper:
         >>> combined_app = socketio.ASGIApp(tsio, app)
     """
 
-    def __init__(self, sio: AsyncServer, app: "FastAPI | None" = None) -> None:
+    def __init__(self, sio: AsyncServer) -> None:
         """Initialize wrapper with an AsyncServer instance.
 
         Args:
             sio: The socketio AsyncServer to wrap.
-            app: Optional FastAPI application instance. When provided,
-                dependencies that accept a ``Request`` parameter will
-                receive a shim with ``request.app`` pointing to this instance.
         """
         self._sio = sio
-        self._app = app
+        self._app: Any = None
         # {namespace: {ExceptionType: handler_fn}}
         # namespace=None means global handler
         self._exception_handlers: dict[str | None, dict[type[Exception], Callable]] = {}
+
+    @property
+    def app(self) -> Any:
+        return self._app
+
+    @app.setter
+    def app(self, value: Any) -> None:
+        self._app = value
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
@@ -806,7 +825,9 @@ class AsyncServerWrapper:
 
         def decorator(handler: Callable) -> Callable:
             # Wrap with validation
-            validated_wrapped = _create_async_handler_wrapper(handler, app=self._app)
+            validated_wrapped = _create_async_handler_wrapper(
+                handler, app_getter=lambda: self._app
+            )
 
             # Add exception handling wrapper
             @wraps(validated_wrapped)
@@ -852,7 +873,9 @@ class AsyncServerWrapper:
         def decorator(handler: Callable) -> Callable:
             event_name = handler.__name__
             # Wrap with validation
-            validated_wrapped = _create_async_handler_wrapper(handler, app=self._app)
+            validated_wrapped = _create_async_handler_wrapper(
+                handler, app_getter=lambda: self._app
+            )
 
             # Add exception handling wrapper
             @wraps(validated_wrapped)
@@ -1552,33 +1575,31 @@ class SyncServerWrapper:
 
 
 @overload
-def wrap(sio: AsyncSimpleClient, *, app: Any = None) -> AsyncSimpleClientWrapper: ...
+def wrap(sio: AsyncSimpleClient) -> AsyncSimpleClientWrapper: ...
 
 
 @overload
-def wrap(sio: SimpleClient, *, app: Any = None) -> SimpleClientWrapper: ...
+def wrap(sio: SimpleClient) -> SimpleClientWrapper: ...
 
 
 @overload
-def wrap(sio: AsyncClient, *, app: Any = None) -> AsyncClientWrapper: ...
+def wrap(sio: AsyncClient) -> AsyncClientWrapper: ...
 
 
 @overload
-def wrap(sio: AsyncServer, *, app: Any = None) -> AsyncServerWrapper: ...
+def wrap(sio: AsyncServer) -> AsyncServerWrapper: ...
 
 
 @overload
-def wrap(sio: Client, *, app: Any = None) -> SyncClientWrapper: ...
+def wrap(sio: Client) -> SyncClientWrapper: ...
 
 
 @overload
-def wrap(sio: Server, *, app: Any = None) -> SyncServerWrapper: ...
+def wrap(sio: Server) -> SyncServerWrapper: ...
 
 
 def wrap(
     sio: AsyncSimpleClient | SimpleClient | AsyncClient | AsyncServer | Client | Server,
-    *,
-    app: Any = None,
 ) -> (
     AsyncSimpleClientWrapper
     | SimpleClientWrapper
@@ -1592,12 +1613,16 @@ def wrap(
     This is the main entry point for the wrapper API. It auto-detects the
     type of socketio instance and returns the appropriate wrapper.
 
+    To enable FastAPI-style ``Request`` injection in dependencies, set the
+    ``.app`` property on the returned wrapper (supported by
+    ``AsyncServerWrapper`` and ``AsyncClientWrapper``)::
+
+        tsio = wrap(socketio.AsyncServer(async_mode='asgi'))
+        tsio.app = app  # can be set later, e.g. inside a lifespan
+
     Args:
         sio: A socketio Client, AsyncClient, Server, AsyncServer,
             SimpleClient, or AsyncSimpleClient instance.
-        app: Optional FastAPI application instance. When provided,
-            dependencies that accept a ``Request`` parameter will
-            receive a shim with ``request.app`` pointing to this instance.
 
     Returns:
         The appropriate wrapper class for the given socketio instance.
@@ -1626,7 +1651,7 @@ def wrap(
     elif isinstance(sio, AsyncClient):
         return AsyncClientWrapper(sio)
     elif isinstance(sio, AsyncServer):
-        return AsyncServerWrapper(sio, app=app)
+        return AsyncServerWrapper(sio)
     elif isinstance(sio, Client):
         return SyncClientWrapper(sio)
     elif isinstance(sio, Server):

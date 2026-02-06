@@ -57,23 +57,26 @@ def test_sio_request_no_url():
 # ---------------------------------------------------------------------------
 
 
-def test_wrap_with_app():
-    """wrap(sio, app=app) stores app on the wrapper."""
+def test_wrap_app_property():
+    """wrap(sio) then .app = app stores app on the wrapper."""
     app = FakeApp()
-    tsio = wrap(socketio.AsyncServer(async_mode="asgi"), app=app)
-    assert tsio._app is app
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
+    assert tsio.app is app
 
 
 def test_wrap_without_app():
-    """wrap(sio) without app sets _app to None."""
+    """wrap(sio) without setting .app leaves it as None."""
     tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
-    assert tsio._app is None
+    assert tsio.app is None
 
 
-def test_wrap_app_ignored_for_client():
-    """wrap() with app kwarg on a client type ignores it."""
-    tsio = wrap(socketio.AsyncClient(), app=FakeApp())
-    assert not hasattr(tsio, "_app") or tsio._app is None
+def test_wrap_app_property_on_client():
+    """.app property works on AsyncClientWrapper too."""
+    app = FakeApp()
+    tsio = wrap(socketio.AsyncClient())
+    tsio.app = app
+    assert tsio.app is app
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +163,55 @@ class EchoResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Deferred app tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deferred_app_set_after_handler_registration(server_factory):
+    """Handler registered before .app is set still gets the app at event time."""
+    from fastapi import FastAPI
+
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+
+    def get_prefix(request: Request) -> str:
+        return request.app.state.prefix
+
+    @tsio.on(EchoRequest)
+    async def handle(
+        sid: str, data: EchoRequest, prefix: Annotated[str, Depends(get_prefix)]
+    ) -> EchoResponse:
+        return EchoResponse(reply=f"{prefix}, {data.msg}")
+
+    # Set app AFTER handler registration
+    app = FastAPI()
+    app.state.prefix = "Deferred"
+    tsio.app = app
+
+    url = await server_factory(socketio.ASGIApp(tsio, app))
+    client = wrap(socketio.AsyncSimpleClient())
+    await client.connect(url)
+
+    resp = await client.call(EchoRequest(msg="world"), response_model=EchoResponse)
+    assert resp.reply == "Deferred, world"
+    await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_request_app_none_when_not_set():
+    """When .app is not set, dependency gets SioRequest(app=None)."""
+    from contextlib import AsyncExitStack
+
+    def get_app_value(request: Request) -> object:
+        return request.app
+
+    deps = {"val": get_app_value}
+    async with AsyncExitStack() as stack:
+        resolved = await _resolve_dependencies(deps, app=None, stack=stack)
+    assert resolved["val"] is None
+
+
+# ---------------------------------------------------------------------------
 # Integration tests: @tsio.on() with Request injection
 # ---------------------------------------------------------------------------
 
@@ -171,7 +223,8 @@ async def test_on_decorator_injects_request(server_factory):
 
     app = FastAPI()
     app.state.prefix = "Hello"
-    tsio = wrap(socketio.AsyncServer(async_mode="asgi"), app=app)
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
 
     def get_prefix(request: Request) -> str:
         return request.app.state.prefix
@@ -201,7 +254,8 @@ async def test_on_decorator_async_generator_dep(server_factory):
 
     app = FastAPI()
     app.state.db_url = "test://"
-    tsio = wrap(socketio.AsyncServer(async_mode="asgi"), app=app)
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
 
     cleanup_called = False
 
@@ -234,7 +288,8 @@ async def test_event_decorator_injects_request(server_factory):
 
     app = FastAPI()
     app.state.prefix = "Hey"
-    tsio = wrap(socketio.AsyncServer(async_mode="asgi"), app=app)
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
 
     def get_prefix(request: Request) -> str:
         return request.app.state.prefix
@@ -268,7 +323,8 @@ async def test_connect_handler_with_depends(server_factory):
 
     app = FastAPI()
     app.state.connections = []
-    tsio = wrap(socketio.AsyncServer(async_mode="asgi"), app=app)
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
 
     def get_connections(request: Request) -> list:
         return request.app.state.connections
@@ -302,7 +358,8 @@ async def test_disconnect_handler_with_depends(server_factory):
 
     app = FastAPI()
     app.state.disconnections = []
-    tsio = wrap(socketio.AsyncServer(async_mode="asgi"), app=app)
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+    tsio.app = app
 
     def get_disconnections(request: Request) -> list:
         return request.app.state.disconnections

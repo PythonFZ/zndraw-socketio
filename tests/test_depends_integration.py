@@ -150,3 +150,23 @@ async def test_depends_with_event_decorator(server_factory):
     assert resp.greeting == "Hello, Dave!"
 
     await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_event_decorator_no_depends(server_factory):
+    """@tsio.event works without Depends — plain handler with Pydantic validation."""
+    app = FastAPI()
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+
+    @tsio.event
+    async def greet_request(sid: str, data: GreetRequest) -> GreetResponse:
+        return GreetResponse(greeting=f"Hi, {data.name}!")
+
+    url = await server_factory(socketio.ASGIApp(tsio, app))
+    client = wrap(socketio.AsyncSimpleClient())
+    await client.connect(url)
+
+    resp = await client.call(GreetRequest(name="Eve"), response_model=GreetResponse)
+    assert resp.greeting == "Hi, Eve!"
+
+    await client.disconnect()
