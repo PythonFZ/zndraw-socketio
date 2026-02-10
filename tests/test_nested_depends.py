@@ -3,7 +3,11 @@
 from contextlib import AsyncExitStack
 
 import pytest
+import socketio
+from fastapi import FastAPI
+from pydantic import BaseModel
 
+from zndraw_socketio import wrap
 from zndraw_socketio.wrapper import _resolve_dependencies
 
 try:
@@ -165,3 +169,52 @@ async def test_nested_async_generator_dep():
         assert resolved["val"] == "async-gen-a-used"
 
     assert cleanup_order == ["async-a-cleanup"]
+
+
+# =============================================================================
+# Integration Test
+# =============================================================================
+
+
+class NestReq(BaseModel):
+    value: int
+
+
+class NestResp(BaseModel):
+    result: str
+
+
+@pytest.mark.asyncio
+async def test_nested_depends_integration(server_factory):
+    """Full server round-trip with diamond deps: offset and scale share base."""
+
+    def get_base() -> int:
+        return 10
+
+    def get_offset(base: int = Depends(get_base)) -> int:
+        return base + 5
+
+    def get_scale(base: int = Depends(get_base)) -> int:
+        return base * 2
+
+    app = FastAPI()
+    tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+
+    @tsio.on(NestReq)
+    async def handle(
+        sid: str,
+        data: NestReq,
+        offset: int = Depends(get_offset),
+        scale: int = Depends(get_scale),
+    ) -> NestResp:
+        return NestResp(result=f"{data.value * scale + offset}")
+
+    url = await server_factory(socketio.ASGIApp(tsio, app))
+    client = wrap(socketio.AsyncSimpleClient())
+    await client.connect(url)
+
+    # base=10, offset=15, scale=20 → 1*20+15=35
+    resp = await client.call(NestReq(value=1), response_model=NestResp)
+    assert resp.result == "35"
+
+    await client.disconnect()
