@@ -311,6 +311,88 @@ def _extract_dependencies(handler: Callable) -> dict[str, Callable]:
     return deps
 
 
+def _get_use_cache(fn: Callable, param_name: str) -> bool:
+    """Return the use_cache flag for a Depends() on the given parameter."""
+    try:
+        hints = get_type_hints(fn, include_extras=True)
+    except Exception:
+        hints = {}
+    hint = hints.get(param_name)
+    if hint is not None and get_origin(hint) is Annotated:
+        for metadata in get_args(hint)[1:]:
+            if isinstance(metadata, _DependsClass):
+                return metadata.use_cache
+    sig = inspect.signature(fn)
+    param = sig.parameters.get(param_name)
+    if param is not None and isinstance(param.default, _DependsClass):
+        return param.default.use_cache
+    return True
+
+
+async def _resolve_single(
+    dep_fn: Callable,
+    *,
+    app: Any = None,
+    environ: dict[str, Any] | None = None,
+    stack: AsyncExitStack,
+    _cache: dict[int, Any],
+    _resolving: set[int],
+    use_cache: bool = True,
+) -> Any:
+    """Resolve a single dependency, recursing into its sub-dependencies first."""
+    cache_key = id(dep_fn)
+
+    if use_cache and cache_key in _cache:
+        return _cache[cache_key]
+
+    if cache_key in _resolving:
+        raise RuntimeError(
+            f"Circular dependency detected: {dep_fn.__qualname__!r}"
+        )
+    _resolving.add(cache_key)
+
+    try:
+        # Recursively resolve sub-dependencies
+        sub_deps = _extract_dependencies(dep_fn)
+        kwargs: dict[str, Any] = {}
+        for sub_name, sub_dep_fn in sub_deps.items():
+            sub_use_cache = _get_use_cache(dep_fn, sub_name)
+            kwargs[sub_name] = await _resolve_single(
+                sub_dep_fn,
+                app=app,
+                environ=environ,
+                stack=stack,
+                _cache=_cache,
+                _resolving=_resolving,
+                use_cache=sub_use_cache,
+            )
+
+        # Inject SioRequest for Request-typed params not already resolved
+        if Request is not None:
+            for pname, param in inspect.signature(dep_fn).parameters.items():
+                if pname not in kwargs and param.annotation is Request:
+                    kwargs[pname] = SioRequest(app=app, environ=environ)
+
+        # Call the dependency
+        if asyncio.iscoroutinefunction(dep_fn):
+            value = await dep_fn(**kwargs)
+        elif inspect.isasyncgenfunction(dep_fn):
+            cm = asynccontextmanager(dep_fn)(**kwargs)
+            value = await stack.enter_async_context(cm)
+        elif inspect.isgeneratorfunction(dep_fn):
+            cm = contextmanager(dep_fn)(**kwargs)
+            value = stack.enter_context(cm)
+        else:
+            value = dep_fn(**kwargs)
+    finally:
+        _resolving.discard(cache_key)
+
+    if use_cache:
+        _cache[cache_key] = value
+
+    return value
+
+
 async def _resolve_dependencies(
     deps: dict[str, Callable],
     *,
@@ -318,7 +400,7 @@ async def _resolve_dependencies(
     environ: dict[str, Any] | None = None,
     stack: AsyncExitStack,
 ) -> dict[str, Any]:
-    """Resolve dependency callables into their values.
+    """Resolve dependency callables into values (recursive, cached, cycle-safe).
 
     Supports sync/async callables and sync/async generators.
     Generator dependencies are wrapped as context managers and registered
@@ -327,6 +409,11 @@ async def _resolve_dependencies(
 
     If a dependency's signature includes a parameter typed as
     ``Request``, a ``SioRequest`` shim is injected automatically.
+
+    Sub-dependencies declared via ``Depends()`` inside dependency functions
+    are resolved recursively. A per-invocation cache (keyed by ``id(dep_fn)``)
+    ensures shared sub-dependencies are only resolved once. Circular
+    dependencies are detected and raise ``RuntimeError``.
 
     Args:
         deps: Dict mapping parameter name to dependency callable.
@@ -337,26 +424,19 @@ async def _resolve_dependencies(
     Returns:
         Dict mapping parameter name to resolved value.
     """
+    _cache: dict[int, Any] = {}
+    _resolving: set[int] = set()
     resolved: dict[str, Any] = {}
 
     for name, dep_fn in deps.items():
-        # Build kwargs: inject SioRequest for Request-typed params
-        kwargs: dict[str, Any] = {}
-        if Request is not None:
-            for pname, param in inspect.signature(dep_fn).parameters.items():
-                if param.annotation is Request:
-                    kwargs[pname] = SioRequest(app=app, environ=environ)
-
-        if asyncio.iscoroutinefunction(dep_fn):
-            resolved[name] = await dep_fn(**kwargs)
-        elif inspect.isasyncgenfunction(dep_fn):
-            cm = asynccontextmanager(dep_fn)(**kwargs)
-            resolved[name] = await stack.enter_async_context(cm)
-        elif inspect.isgeneratorfunction(dep_fn):
-            cm = contextmanager(dep_fn)(**kwargs)
-            resolved[name] = stack.enter_context(cm)
-        else:
-            resolved[name] = dep_fn(**kwargs)
+        resolved[name] = await _resolve_single(
+            dep_fn,
+            app=app,
+            environ=environ,
+            stack=stack,
+            _cache=_cache,
+            _resolving=_resolving,
+        )
 
     return resolved
 

@@ -1,17 +1,13 @@
 """Tests for nested (sub-)dependency resolution."""
 
 from contextlib import AsyncExitStack
-from typing import Annotated
 
 import pytest
-import socketio
-from pydantic import BaseModel
 
-from zndraw_socketio import wrap
-from zndraw_socketio.wrapper import _extract_dependencies, _resolve_dependencies
+from zndraw_socketio.wrapper import _resolve_dependencies
 
 try:
-    from fastapi import Depends, FastAPI
+    from fastapi import Depends
 except ImportError:
     from zndraw_socketio.params import Depends
 
@@ -122,7 +118,7 @@ async def test_use_cache_false_resolves_fresh():
         return s
 
     async with AsyncExitStack() as stack:
-        resolved = await _resolve_dependencies(
+        await _resolve_dependencies(
             {"c1": consumer_1, "c2": consumer_2}, stack=stack
         )
 
