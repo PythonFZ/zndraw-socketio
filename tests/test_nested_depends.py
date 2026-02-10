@@ -8,7 +8,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from zndraw_socketio import wrap
-from zndraw_socketio.wrapper import _resolve_dependencies
+from zndraw_socketio.wrapper import (
+    Request,
+    SioRequest,
+    _resolve_dependencies,
+    _resolve_single,
+)
 
 try:
     from fastapi import Depends
@@ -218,3 +223,145 @@ async def test_nested_depends_integration(server_factory):
     assert resp.result == "35"
 
     await client.disconnect()
+
+
+# =============================================================================
+# Issue 1: Top-level use_cache=False respected for handler dependencies
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_top_level_use_cache_false_respected():
+    """Handler-level Depends(fn, use_cache=False) is passed through to resolver."""
+    call_count = 0
+
+    def fresh_dep() -> str:
+        nonlocal call_count
+        call_count += 1
+        return f"v{call_count}"
+
+    async def handler(
+        sid: str,
+        a: str = Depends(fresh_dep, use_cache=False),
+        b: str = Depends(fresh_dep, use_cache=False),
+    ) -> str:
+        return a + b
+
+    from zndraw_socketio.wrapper import (
+        _extract_dependencies,
+        _get_use_cache,
+    )
+
+    deps = _extract_dependencies(handler)
+    use_cache_flags = {name: _get_use_cache(handler, name) for name in deps}
+
+    # Both should be False
+    assert use_cache_flags["a"] is False
+    assert use_cache_flags["b"] is False
+
+    async with AsyncExitStack() as stack:
+        resolved = await _resolve_dependencies(
+            deps, stack=stack, use_cache_overrides=use_cache_flags
+        )
+
+    # fresh_dep should be called twice (once per param) because use_cache=False
+    assert call_count == 2
+    assert resolved["a"] == "v1"
+    assert resolved["b"] == "v2"
+
+
+@pytest.mark.asyncio
+async def test_top_level_use_cache_true_default():
+    """Handler-level Depends(fn) defaults to use_cache=True (cached)."""
+    call_count = 0
+
+    def cached_dep() -> str:
+        nonlocal call_count
+        call_count += 1
+        return f"v{call_count}"
+
+    async def handler(
+        sid: str,
+        a: str = Depends(cached_dep),
+        b: str = Depends(cached_dep),
+    ) -> str:
+        return a + b
+
+    from zndraw_socketio.wrapper import (
+        _extract_dependencies,
+        _get_use_cache,
+    )
+
+    deps = _extract_dependencies(handler)
+    use_cache_flags = {name: _get_use_cache(handler, name) for name in deps}
+
+    # Both should be True (default)
+    assert use_cache_flags["a"] is True
+    assert use_cache_flags["b"] is True
+
+    async with AsyncExitStack() as stack:
+        resolved = await _resolve_dependencies(
+            deps, stack=stack, use_cache_overrides=use_cache_flags
+        )
+
+    # cached_dep should be called only once because use_cache=True
+    assert call_count == 1
+    assert resolved["a"] == "v1"
+    assert resolved["b"] == "v1"
+
+
+# =============================================================================
+# Issue 2: Cycle detection test
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_cycle_detection_raises():
+    """Circular dependency should raise RuntimeError."""
+
+    def dep_fn() -> str:
+        return "x"
+
+    async with AsyncExitStack() as stack:
+        _cache: dict[int, object] = {}
+        _resolving: set[int] = set()
+
+        # Pre-mark dep_fn as "being resolved" to simulate a cycle
+        _resolving.add(id(dep_fn))
+
+        with pytest.raises(RuntimeError, match="Circular dependency"):
+            await _resolve_single(
+                dep_fn,
+                stack=stack,
+                _cache=_cache,
+                _resolving=_resolving,
+            )
+
+
+# =============================================================================
+# Issue 3: Nested SioRequest injection test
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_nested_request_injection():
+    """Sub-dependency receives SioRequest when it has a Request param."""
+    received_request = None
+
+    def sub_dep(request: Request) -> str:
+        nonlocal received_request
+        received_request = request
+        return "from-request"
+
+    def parent_dep(val: str = Depends(sub_dep)) -> str:
+        return val + "-parent"
+
+    fake_app = object()
+    async with AsyncExitStack() as stack:
+        resolved = await _resolve_dependencies(
+            {"result": parent_dep}, app=fake_app, stack=stack
+        )
+
+    assert resolved["result"] == "from-request-parent"
+    assert isinstance(received_request, SioRequest)
+    assert received_request.app is fake_app

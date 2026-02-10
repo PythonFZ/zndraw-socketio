@@ -399,6 +399,7 @@ async def _resolve_dependencies(
     app: Any = None,
     environ: dict[str, Any] | None = None,
     stack: AsyncExitStack,
+    use_cache_overrides: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Resolve dependency callables into values (recursive, cached, cycle-safe).
 
@@ -420,6 +421,10 @@ async def _resolve_dependencies(
         app: Optional FastAPI app instance for Request injection.
         environ: Optional ASGI environ dict from ``sio.get_environ(sid)``.
         stack: AsyncExitStack for managing generator dependency lifecycle.
+        use_cache_overrides: Optional dict mapping parameter name to
+            ``use_cache`` flag.  When provided, the flag for each
+            top-level dependency is looked up here instead of
+            defaulting to ``True``.
 
     Returns:
         Dict mapping parameter name to resolved value.
@@ -429,6 +434,11 @@ async def _resolve_dependencies(
     resolved: dict[str, Any] = {}
 
     for name, dep_fn in deps.items():
+        uc = (
+            use_cache_overrides.get(name, True)
+            if use_cache_overrides is not None
+            else True
+        )
         resolved[name] = await _resolve_single(
             dep_fn,
             app=app,
@@ -436,6 +446,7 @@ async def _resolve_dependencies(
             stack=stack,
             _cache=_cache,
             _resolving=_resolving,
+            use_cache=uc,
         )
 
     return resolved
@@ -470,6 +481,7 @@ def _create_async_handler_wrapper(
     deps = _extract_dependencies(handler)
 
     if deps:
+        use_cache_flags = {name: _get_use_cache(handler, name) for name in deps}
 
         @wraps(handler)
         async def _dep_handler(*args: Any, **kwargs: Any) -> Any:
@@ -479,7 +491,11 @@ def _create_async_handler_wrapper(
                 if environ_getter is not None and args:
                     environ = environ_getter(args[0])  # args[0] is sid
                 resolved = await _resolve_dependencies(
-                    deps, app=app, environ=environ, stack=stack
+                    deps,
+                    app=app,
+                    environ=environ,
+                    stack=stack,
+                    use_cache_overrides=use_cache_flags,
                 )
                 kwargs.update(resolved)
                 return await handler(*args, **kwargs)
