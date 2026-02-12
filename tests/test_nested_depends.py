@@ -48,9 +48,7 @@ async def test_nested_async_deps_resolved():
         return a + "-bbb"
 
     async with AsyncExitStack() as stack:
-        resolved = await _resolve_dependencies(
-            {"val": dep_with_async_sub}, stack=stack
-        )
+        resolved = await _resolve_dependencies({"val": dep_with_async_sub}, stack=stack)
     assert resolved["val"] == "async-aaa-bbb"
 
 
@@ -99,9 +97,7 @@ async def test_diamond_dependency_pattern():
         return c + 200
 
     async with AsyncExitStack() as stack:
-        resolved = await _resolve_dependencies(
-            {"a": dep_a, "b": dep_b}, stack=stack
-        )
+        resolved = await _resolve_dependencies({"a": dep_a, "b": dep_b}, stack=stack)
 
     # D=1, C=11, A=11+1+100=112, B=11+200=211
     assert resolved["a"] == 112
@@ -127,9 +123,7 @@ async def test_use_cache_false_resolves_fresh():
         return s
 
     async with AsyncExitStack() as stack:
-        await _resolve_dependencies(
-            {"c1": consumer_1, "c2": consumer_2}, stack=stack
-        )
+        await _resolve_dependencies({"c1": consumer_1, "c2": consumer_2}, stack=stack)
 
     assert call_count == 2
 
@@ -147,9 +141,7 @@ async def test_nested_sync_generator_dep():
         return a + "-used"
 
     async with AsyncExitStack() as stack:
-        resolved = await _resolve_dependencies(
-            {"val": dep_using_gen}, stack=stack
-        )
+        resolved = await _resolve_dependencies({"val": dep_using_gen}, stack=stack)
         assert resolved["val"] == "gen-a-used"
 
     assert cleanup_order == ["a-cleanup"]

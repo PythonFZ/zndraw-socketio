@@ -44,6 +44,8 @@ from socketio import (
 )
 from typing_extensions import TypeForm
 
+from zndraw_socketio.asyncapi import _HandlerMeta, generate_asyncapi_schema
+
 try:
     from fastapi.params import Depends as _DependsClass
 except ImportError:
@@ -55,6 +57,31 @@ except ImportError:
     Request = None  # type: ignore[assignment, misc]
 
 T = TypeVar("T")
+
+
+def _find_input_type(handler: Callable, hints: dict[str, Any]) -> Any:
+    """Find the first non-str parameter type hint (the payload type)."""
+    sig = inspect.signature(handler)
+    for p in sig.parameters.values():
+        hint = hints.get(p.name)
+        if hint is None:
+            continue
+        inner = get_args(hint)[0] if get_origin(hint) is Annotated else hint
+        if inner is not str:
+            return hint
+    return None
+
+
+def _collect_handler_meta(handler: Callable, event_name: str) -> _HandlerMeta:
+    """Extract handler metadata for AsyncAPI schema generation."""
+    hints = get_type_hints(handler, include_extras=True)
+    return _HandlerMeta(
+        event_name=event_name,
+        handler_name=handler.__name__,
+        input_type=_find_input_type(handler, hints),
+        return_type=hints.get("return"),
+        docstring=inspect.getdoc(handler),
+    )
 
 
 # =============================================================================
@@ -346,9 +373,7 @@ async def _resolve_single(
         return _cache[cache_key]
 
     if cache_key in _resolving:
-        raise RuntimeError(
-            f"Circular dependency detected: {dep_fn.__qualname__!r}"
-        )
+        raise RuntimeError(f"Circular dependency detected: {dep_fn.__qualname__!r}")
     _resolving.add(cache_key)
 
     try:
@@ -571,6 +596,7 @@ class AsyncClientWrapper:
         """
         self._sio = sio
         self._app: Any = None
+        self._handler_registry: list[_HandlerMeta] = []
 
     @property
     def app(self) -> Any:
@@ -713,6 +739,7 @@ class AsyncClientWrapper:
                 handler, app_getter=lambda: self._app
             )
             self._sio.on(event_name, wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
@@ -748,11 +775,26 @@ class AsyncClientWrapper:
                 handler, app_getter=lambda: self._app
             )
             self._sio.on(event_name, wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
+
+    def asyncapi_schema(
+        self,
+        title: str = "Socket.IO API",
+        version: str = "1.0.0",
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate an AsyncAPI 3.0 specification from registered handlers."""
+        return generate_asyncapi_schema(
+            self._handler_registry,
+            title=title,
+            version=version,
+            description=description,
+        )
 
 
 # =============================================================================
@@ -802,6 +844,7 @@ class AsyncServerWrapper:
         """
         self._sio = sio
         self._app: Any = None
+        self._handler_registry: list[_HandlerMeta] = []
         # {namespace: {ExceptionType: handler_fn}}
         # namespace=None means global handler
         self._exception_handlers: dict[str | None, dict[type[Exception], Callable]] = {}
@@ -1057,6 +1100,7 @@ class AsyncServerWrapper:
                     return result
 
             self._sio.on(event_name, exc_wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
@@ -1107,11 +1151,26 @@ class AsyncServerWrapper:
                     return result
 
             self._sio.on(event_name, exc_wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
+
+    def asyncapi_schema(
+        self,
+        title: str = "Socket.IO API",
+        version: str = "1.0.0",
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate an AsyncAPI 3.0 specification from registered handlers."""
+        return generate_asyncapi_schema(
+            self._handler_registry,
+            title=title,
+            version=version,
+            description=description,
+        )
 
 
 # =============================================================================
@@ -1133,6 +1192,7 @@ class SyncClientWrapper:
             sio: The socketio Client to wrap.
         """
         self._sio = sio
+        self._handler_registry: list[_HandlerMeta] = []
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
@@ -1251,6 +1311,7 @@ class SyncClientWrapper:
         def decorator(handler: Callable) -> Callable:
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
@@ -1272,11 +1333,26 @@ class SyncClientWrapper:
             event_name = handler.__name__
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
+
+    def asyncapi_schema(
+        self,
+        title: str = "Socket.IO API",
+        version: str = "1.0.0",
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate an AsyncAPI 3.0 specification from registered handlers."""
+        return generate_asyncapi_schema(
+            self._handler_registry,
+            title=title,
+            version=version,
+            description=description,
+        )
 
 
 # =============================================================================
@@ -1629,6 +1705,7 @@ class SyncServerWrapper:
             sio: The socketio Server to wrap.
         """
         self._sio = sio
+        self._handler_registry: list[_HandlerMeta] = []
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
@@ -1748,6 +1825,7 @@ class SyncServerWrapper:
         def decorator(handler: Callable) -> Callable:
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
@@ -1769,11 +1847,26 @@ class SyncServerWrapper:
             event_name = handler.__name__
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
+            self._handler_registry.append(_collect_handler_meta(handler, event_name))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
+
+    def asyncapi_schema(
+        self,
+        title: str = "Socket.IO API",
+        version: str = "1.0.0",
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate an AsyncAPI 3.0 specification from registered handlers."""
+        return generate_asyncapi_schema(
+            self._handler_registry,
+            title=title,
+            version=version,
+            description=description,
+        )
 
 
 # =============================================================================
