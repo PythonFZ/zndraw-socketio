@@ -1,18 +1,13 @@
 [project]
 name = "zndraw-socketio"
-version = "0.1.3"
+version = "0.1.4"
 description = "Typed wrapper for python-socketio with Pydantic validation and dependency injection."
 readme = "README.md"
 authors = [
-    { name = "Atomie CHEN", email = "atomic_cwh@163.com" },
     { name = "Fabian Zills", email = "fabian.zills@web.de" }
 ]
 requires-python = ">=3.10"
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-]
+license = { file = "LICENSE" }
 keywords = ["socketio", "pydantic", "wrapper", "typed", "zndraw"]
 dependencies = [
     "pydantic>=2.10.6",
