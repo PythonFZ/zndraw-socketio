@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import BaseModel
@@ -15,6 +16,15 @@ class _HandlerMeta:
     input_type: Any  # raw type hint (may be Union, Annotated, etc.)
     return_type: Any  # raw type hint (may be Union, Annotated, etc.)
     docstring: str | None  # handler function docstring
+    emits: list[type[BaseModel]] = field(default_factory=list)  # side-effect events
+
+
+def _get_event_name(model: type[BaseModel]) -> str:
+    """Derive event name from a BaseModel class (local to avoid circular import)."""
+    if hasattr(model, "event_name"):
+        return model.event_name  # type: ignore[return-value]
+    name = model.__name__
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
 def _unwrap_annotated(t: Any) -> Any:
@@ -182,6 +192,57 @@ def generate_asyncapi_schema(
             }
 
         operations[op_name] = operation
+
+    # --- Collect emits and build bidirectional x-emits / x-triggered-by ---
+    # Map: emit model class → list of receive operation names that emit it
+    emit_model_triggers: dict[type, list[str]] = {}
+    for handler in handlers:
+        receive_op_name = _to_camel_case(handler.handler_name)
+        for model in handler.emits:
+            emit_model_triggers.setdefault(model, []).append(receive_op_name)
+
+    # Create send channels/operations and annotate receive operations
+    for model, trigger_op_names in emit_model_triggers.items():
+        emit_event = _get_event_name(model)
+        name = model.__name__
+        send_op_name = f"send{name}"
+
+        # Add schema + message to components
+        _add_model_to_components(model, name, component_schemas, component_messages)
+
+        # Create channel if not already present
+        if emit_event not in channels:
+            channels[emit_event] = {
+                "address": emit_event,
+                "messages": {name: {"$ref": f"#/components/messages/{name}"}},
+            }
+        else:
+            # Add message to existing channel if not present
+            ch_msgs = channels[emit_event]["messages"]
+            if name not in ch_msgs:
+                ch_msgs[name] = {"$ref": f"#/components/messages/{name}"}
+
+        # Create send operation with x-triggered-by
+        if send_op_name not in operations:
+            operations[send_op_name] = {
+                "action": "send",
+                "channel": {"$ref": f"#/channels/{emit_event}"},
+                "messages": [{"$ref": f"#/channels/{emit_event}/messages/{name}"}],
+                "x-triggered-by": list(trigger_op_names),
+            }
+        else:
+            # Merge additional triggers into existing send operation
+            existing_refs = set(operations[send_op_name].get("x-triggered-by", []))
+            for op in trigger_op_names:
+                if op not in existing_refs:
+                    operations[send_op_name].setdefault("x-triggered-by", []).append(op)
+
+        # Add x-emits to each triggering receive operation
+        for op in trigger_op_names:
+            if op in operations:
+                operations[op].setdefault("x-emits", [])
+                if send_op_name not in operations[op]["x-emits"]:
+                    operations[op]["x-emits"].append(send_op_name)
 
     # --- Assemble top-level spec ---
     info: dict[str, Any] = {"title": title, "version": version}

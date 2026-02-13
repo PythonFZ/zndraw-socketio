@@ -55,6 +55,28 @@ async def ping(sid: str, data: Ping) -> Pong:
     return Pong(reply=data.message)
 ```
 
+## Outbound Event Documentation
+Handlers that emit events to other channels can declare them with `emits`:
+
+```python
+class SessionLeft(BaseModel):
+    room_id: str
+    user_id: str
+
+@tsio.on("disconnect", emits=[SessionLeft])
+async def handle_disconnect(sid: str) -> None:
+    await tsio.emit(SessionLeft(room_id="room1", user_id="user1"), room="room1")
+```
+
+These appear as `action: "send"` operations in the generated AsyncAPI schema.
+
+## AsyncAPI Schema Generation
+Generate an AsyncAPI 3.0 specification from registered handlers:
+
+```python
+schema = tsio.asyncapi_schema(title="My API", version="1.0.0")
+```
+
 ## Event Names
 By default, the event name is the class name in snake_case. You can customize it by setting the `event_name` attribute.
 

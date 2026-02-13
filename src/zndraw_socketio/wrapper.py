@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+import warnings
+from collections.abc import Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from functools import wraps
@@ -72,7 +74,11 @@ def _find_input_type(handler: Callable, hints: dict[str, Any]) -> Any:
     return None
 
 
-def _collect_handler_meta(handler: Callable, event_name: str) -> _HandlerMeta:
+def _collect_handler_meta(
+    handler: Callable,
+    event_name: str,
+    emits: Sequence[type[BaseModel]] | None = None,
+) -> _HandlerMeta:
     """Extract handler metadata for AsyncAPI schema generation."""
     hints = get_type_hints(handler, include_extras=True)
     return _HandlerMeta(
@@ -81,6 +87,7 @@ def _collect_handler_meta(handler: Callable, event_name: str) -> _HandlerMeta:
         input_type=_find_input_type(handler, hints),
         return_type=hints.get("return"),
         docstring=inspect.getdoc(handler),
+        emits=list(emits) if emits else [],
     )
 
 
@@ -588,15 +595,18 @@ class AsyncClientWrapper:
         >>> await sio.emit(Ping(message="hello"))
     """
 
-    def __init__(self, sio: AsyncClient) -> None:
+    def __init__(self, sio: AsyncClient, warn_undocumented_emits: bool = False) -> None:
         """Initialize wrapper with an AsyncClient instance.
 
         Args:
             sio: The socketio AsyncClient to wrap.
+            warn_undocumented_emits: If True, warn when emitting undocumented events.
         """
         self._sio = sio
         self._app: Any = None
         self._handler_registry: list[_HandlerMeta] = []
+        self._known_emit_events: set[str] = set()
+        self._warn_undocumented_emits = warn_undocumented_emits
 
     @property
     def app(self) -> Any:
@@ -641,6 +651,12 @@ class AsyncClientWrapper:
             **kwargs: Additional arguments passed to socketio's emit.
         """
         event_name, payload = _resolve_emit_args(event, data)
+        if self._warn_undocumented_emits and event_name not in self._known_emit_events:
+            warnings.warn(
+                f"Emitting undocumented event '{event_name}'. "
+                "Register it via emits= on a handler or add a handler for it.",
+                stacklevel=2,
+            )
         await self._sio.emit(event_name, payload, **kwargs)
 
     @overload
@@ -704,6 +720,7 @@ class AsyncClientWrapper:
         self,
         event: str | Type[BaseModel],
         handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,
     ) -> Callable[[Callable], Callable] | Callable:
         """Register an event handler.
@@ -739,14 +756,25 @@ class AsyncClientWrapper:
                 handler, app_getter=lambda: self._app
             )
             self._sio.on(event_name, wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
 
-    def event(self, handler: Callable | None = None, **kwargs: Any) -> Callable:
+    def event(
+        self,
+        handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
+        **kwargs: Any,
+    ) -> Callable:
         """Register an event handler using the function name as the event name.
 
         This decorator uses the function name directly as the event name and
@@ -754,6 +782,7 @@ class AsyncClientWrapper:
 
         Args:
             handler: The event handler function.
+            emits: Optional list of BaseModel classes for side-effect events.
             **kwargs: Additional arguments passed to socketio's on (e.g., namespace).
 
         Returns:
@@ -775,7 +804,13 @@ class AsyncClientWrapper:
                 handler, app_getter=lambda: self._app
             )
             self._sio.on(event_name, wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
@@ -836,15 +871,18 @@ class AsyncServerWrapper:
         >>> combined_app = socketio.ASGIApp(tsio, app)
     """
 
-    def __init__(self, sio: AsyncServer) -> None:
+    def __init__(self, sio: AsyncServer, warn_undocumented_emits: bool = False) -> None:
         """Initialize wrapper with an AsyncServer instance.
 
         Args:
             sio: The socketio AsyncServer to wrap.
+            warn_undocumented_emits: If True, warn when emitting undocumented events.
         """
         self._sio = sio
         self._app: Any = None
         self._handler_registry: list[_HandlerMeta] = []
+        self._known_emit_events: set[str] = set()
+        self._warn_undocumented_emits = warn_undocumented_emits
         # {namespace: {ExceptionType: handler_fn}}
         # namespace=None means global handler
         self._exception_handlers: dict[str | None, dict[type[Exception], Callable]] = {}
@@ -983,6 +1021,12 @@ class AsyncServerWrapper:
             **kwargs: Additional arguments passed to socketio's emit (to, room, etc).
         """
         event_name, payload = _resolve_emit_args(event, data)
+        if self._warn_undocumented_emits and event_name not in self._known_emit_events:
+            warnings.warn(
+                f"Emitting undocumented event '{event_name}'. "
+                "Register it via emits= on a handler or add a handler for it.",
+                stacklevel=2,
+            )
         await self._sio.emit(event_name, payload, **kwargs)
 
     # call overloads (see PEP 747 note in AsyncClientWrapper)
@@ -1047,6 +1091,7 @@ class AsyncServerWrapper:
         self,
         event: str | Type[BaseModel],
         handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,
     ) -> Callable[[Callable], Callable] | Callable:
         """Register an event handler with exception handling support.
@@ -1057,6 +1102,7 @@ class AsyncServerWrapper:
         Args:
             event: Either a string event name or a BaseModel class.
             handler: Optional handler function (if not using as decorator).
+            emits: Optional list of BaseModel classes for side-effect events.
             **kwargs: Additional arguments passed to socketio's on (e.g., namespace).
 
         Returns:
@@ -1100,18 +1146,30 @@ class AsyncServerWrapper:
                     return result
 
             self._sio.on(event_name, exc_wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
 
-    def event(self, handler: Callable | None = None, **kwargs: Any) -> Callable:
+    def event(
+        self,
+        handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
+        **kwargs: Any,
+    ) -> Callable:
         """Register an event handler using the function name as the event name.
 
         Args:
             handler: The event handler function.
+            emits: Optional list of BaseModel classes for side-effect events.
             **kwargs: Additional arguments passed to socketio's on (e.g., namespace).
 
         Returns:
@@ -1151,7 +1209,13 @@ class AsyncServerWrapper:
                     return result
 
             self._sio.on(event_name, exc_wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
@@ -1185,14 +1249,17 @@ class SyncClientWrapper:
     attributes to the underlying Client instance.
     """
 
-    def __init__(self, sio: Client) -> None:
+    def __init__(self, sio: Client, warn_undocumented_emits: bool = False) -> None:
         """Initialize wrapper with a Client instance.
 
         Args:
             sio: The socketio Client to wrap.
+            warn_undocumented_emits: If True, warn when emitting undocumented events.
         """
         self._sio = sio
         self._handler_registry: list[_HandlerMeta] = []
+        self._known_emit_events: set[str] = set()
+        self._warn_undocumented_emits = warn_undocumented_emits
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
@@ -1228,6 +1295,12 @@ class SyncClientWrapper:
             **kwargs: Additional arguments passed to socketio's emit.
         """
         event_name, payload = _resolve_emit_args(event, data)
+        if self._warn_undocumented_emits and event_name not in self._known_emit_events:
+            warnings.warn(
+                f"Emitting undocumented event '{event_name}'. "
+                "Register it via emits= on a handler or add a handler for it.",
+                stacklevel=2,
+            )
         self._sio.emit(event_name, payload, **kwargs)
 
     @overload
@@ -1291,6 +1364,7 @@ class SyncClientWrapper:
         self,
         event: str | Type[BaseModel],
         handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,
     ) -> Callable[[Callable], Callable] | Callable:
         """Register an event handler.
@@ -1298,6 +1372,7 @@ class SyncClientWrapper:
         Args:
             event: Either a string event name or a BaseModel class.
             handler: Optional handler function (if not using as decorator).
+            emits: Optional list of BaseModel classes for side-effect events.
             **kwargs: Additional arguments passed to socketio's on (e.g., namespace).
 
         Returns:
@@ -1311,18 +1386,30 @@ class SyncClientWrapper:
         def decorator(handler: Callable) -> Callable:
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
 
-    def event(self, handler: Callable | None = None, **kwargs: Any) -> Callable:
+    def event(
+        self,
+        handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
+        **kwargs: Any,
+    ) -> Callable:
         """Register an event handler using the function name as the event name.
 
         Args:
             handler: The event handler function.
+            emits: Optional list of BaseModel classes for side-effect events.
             **kwargs: Additional arguments passed to socketio's on (e.g., namespace).
 
         Returns:
@@ -1333,7 +1420,13 @@ class SyncClientWrapper:
             event_name = handler.__name__
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
@@ -1698,14 +1791,17 @@ class SyncServerWrapper:
     attributes to the underlying Server instance.
     """
 
-    def __init__(self, sio: Server) -> None:
+    def __init__(self, sio: Server, warn_undocumented_emits: bool = False) -> None:
         """Initialize wrapper with a Server instance.
 
         Args:
             sio: The socketio Server to wrap.
+            warn_undocumented_emits: If True, warn when emitting undocumented events.
         """
         self._sio = sio
         self._handler_registry: list[_HandlerMeta] = []
+        self._known_emit_events: set[str] = set()
+        self._warn_undocumented_emits = warn_undocumented_emits
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
@@ -1741,6 +1837,12 @@ class SyncServerWrapper:
             **kwargs: Additional arguments passed to socketio's emit.
         """
         event_name, payload = _resolve_emit_args(event, data)
+        if self._warn_undocumented_emits and event_name not in self._known_emit_events:
+            warnings.warn(
+                f"Emitting undocumented event '{event_name}'. "
+                "Register it via emits= on a handler or add a handler for it.",
+                stacklevel=2,
+            )
         self._sio.emit(event_name, payload, **kwargs)
 
     # call overloads (see PEP 747 note in AsyncClientWrapper)
@@ -1805,6 +1907,7 @@ class SyncServerWrapper:
         self,
         event: str | Type[BaseModel],
         handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,
     ) -> Callable[[Callable], Callable] | Callable:
         """Register an event handler.
@@ -1812,6 +1915,7 @@ class SyncServerWrapper:
         Args:
             event: Either a string event name or a BaseModel class.
             handler: Optional handler function (if not using as decorator).
+            emits: Optional list of BaseModel classes for side-effect events.
             **kwargs: Additional arguments passed to socketio's on (e.g., namespace).
 
         Returns:
@@ -1825,18 +1929,30 @@ class SyncServerWrapper:
         def decorator(handler: Callable) -> Callable:
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
             return decorator(handler)
         return decorator
 
-    def event(self, handler: Callable | None = None, **kwargs: Any) -> Callable:
+    def event(
+        self,
+        handler: Callable | None = None,
+        emits: Sequence[type[BaseModel]] | None = None,
+        **kwargs: Any,
+    ) -> Callable:
         """Register an event handler using the function name as the event name.
 
         Args:
             handler: The event handler function.
+            emits: Optional list of BaseModel classes for side-effect events.
             **kwargs: Additional arguments passed to socketio's on (e.g., namespace).
 
         Returns:
@@ -1847,7 +1963,13 @@ class SyncServerWrapper:
             event_name = handler.__name__
             wrapped = _create_sync_handler_wrapper(handler)
             self._sio.on(event_name, wrapped, **kwargs)
-            self._handler_registry.append(_collect_handler_meta(handler, event_name))
+            self._handler_registry.append(
+                _collect_handler_meta(handler, event_name, emits=emits)
+            )
+            self._known_emit_events.add(event_name)
+            if emits:
+                for m in emits:
+                    self._known_emit_events.add(get_event_name(m))
             return handler
 
         if handler is not None:
@@ -1875,31 +1997,45 @@ class SyncServerWrapper:
 
 
 @overload
-def wrap(sio: AsyncSimpleClient) -> AsyncSimpleClientWrapper: ...
+def wrap(
+    sio: AsyncSimpleClient, *, warn_undocumented_emits: bool = False
+) -> AsyncSimpleClientWrapper: ...
 
 
 @overload
-def wrap(sio: SimpleClient) -> SimpleClientWrapper: ...
+def wrap(
+    sio: SimpleClient, *, warn_undocumented_emits: bool = False
+) -> SimpleClientWrapper: ...
 
 
 @overload
-def wrap(sio: AsyncClient) -> AsyncClientWrapper: ...
+def wrap(
+    sio: AsyncClient, *, warn_undocumented_emits: bool = False
+) -> AsyncClientWrapper: ...
 
 
 @overload
-def wrap(sio: AsyncServer) -> AsyncServerWrapper: ...
+def wrap(
+    sio: AsyncServer, *, warn_undocumented_emits: bool = False
+) -> AsyncServerWrapper: ...
 
 
 @overload
-def wrap(sio: Client) -> SyncClientWrapper: ...
+def wrap(
+    sio: Client, *, warn_undocumented_emits: bool = False
+) -> SyncClientWrapper: ...
 
 
 @overload
-def wrap(sio: Server) -> SyncServerWrapper: ...
+def wrap(
+    sio: Server, *, warn_undocumented_emits: bool = False
+) -> SyncServerWrapper: ...
 
 
 def wrap(
     sio: AsyncSimpleClient | SimpleClient | AsyncClient | AsyncServer | Client | Server,
+    *,
+    warn_undocumented_emits: bool = False,
 ) -> (
     AsyncSimpleClientWrapper
     | SimpleClientWrapper
@@ -1923,6 +2059,8 @@ def wrap(
     Args:
         sio: A socketio Client, AsyncClient, Server, AsyncServer,
             SimpleClient, or AsyncSimpleClient instance.
+        warn_undocumented_emits: If True, emit a warning when calling emit()
+            with an event not registered via on()/event() or their emits= param.
 
     Returns:
         The appropriate wrapper class for the given socketio instance.
@@ -1949,11 +2087,11 @@ def wrap(
     elif isinstance(sio, SimpleClient):
         return SimpleClientWrapper(sio)
     elif isinstance(sio, AsyncClient):
-        return AsyncClientWrapper(sio)
+        return AsyncClientWrapper(sio, warn_undocumented_emits=warn_undocumented_emits)
     elif isinstance(sio, AsyncServer):
-        return AsyncServerWrapper(sio)
+        return AsyncServerWrapper(sio, warn_undocumented_emits=warn_undocumented_emits)
     elif isinstance(sio, Client):
-        return SyncClientWrapper(sio)
+        return SyncClientWrapper(sio, warn_undocumented_emits=warn_undocumented_emits)
     elif isinstance(sio, Server):
-        return SyncServerWrapper(sio)
+        return SyncServerWrapper(sio, warn_undocumented_emits=warn_undocumented_emits)
     raise TypeError(f"Expected socketio instance, got {type(sio)}")

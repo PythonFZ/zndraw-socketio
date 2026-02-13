@@ -22,6 +22,7 @@ Add AsyncAPI 3.0 schema generation to zndraw-socketio, allowing users to auto-ge
 | Union return (`Error \| Success`) | Reply channel with multiple messages |
 | Union input (`Ping \| AdvancedPing`) | Channel with multiple messages |
 | Socket.IO ack (callback) | Reply channel with `address: null` (ephemeral) |
+| `emits=[Model]` on handler | Channel + Operation with `action: "send"` |
 
 ## Type Introspection
 
@@ -74,6 +75,7 @@ class _HandlerMeta:
     input_type: Any             # raw type hint (may be Union, Annotated, etc.)
     return_type: Any            # raw type hint (may be Union, Annotated, etc.)
     docstring: str | None       # handler function docstring
+    emits: list[type[BaseModel]]  # side-effect events emitted by handler
 ```
 
 Unpacking of `Annotated`, `Union`, etc. happens in `generate_asyncapi_schema()`, not at registration time.

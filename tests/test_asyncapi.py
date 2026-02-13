@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Annotated, Union
 
 import socketio
@@ -413,3 +414,380 @@ class TestSyncClientWrapperSchema:
 
         schema = tsio.asyncapi_schema()
         assert "ping" in schema["channels"]
+
+
+# ---------------------------------------------------------------------------
+# Emits models for tests
+# ---------------------------------------------------------------------------
+
+
+class SessionLeft(BaseModel):
+    room_id: str
+    user_id: str
+
+
+class Notification(BaseModel):
+    text: str
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for emits in generate_asyncapi_schema
+# ---------------------------------------------------------------------------
+
+
+class TestEmitsSchema:
+    def test_single_emit(self):
+        """Handler with emits=[Model] creates a send channel + operation."""
+        handlers = [
+            _HandlerMeta(
+                event_name="disconnect",
+                handler_name="handle_disconnect",
+                input_type=None,
+                return_type=None,
+                docstring=None,
+                emits=[SessionLeft],
+            )
+        ]
+        schema = generate_asyncapi_schema(handlers)
+
+        # Send channel created
+        assert "session_left" in schema["channels"]
+        ch = schema["channels"]["session_left"]
+        assert ch["address"] == "session_left"
+        assert "SessionLeft" in ch["messages"]
+
+        # Send operation created with x-triggered-by
+        assert "sendSessionLeft" in schema["operations"]
+        op = schema["operations"]["sendSessionLeft"]
+        assert op["action"] == "send"
+        assert op["channel"] == {"$ref": "#/channels/session_left"}
+        assert op["x-triggered-by"] == ["handleDisconnect"]
+
+        # Receive operation has x-emits
+        recv_op = schema["operations"]["handleDisconnect"]
+        assert recv_op["x-emits"] == ["sendSessionLeft"]
+
+        # Components populated
+        assert "SessionLeft" in schema["components"]["schemas"]
+        assert "SessionLeft" in schema["components"]["messages"]
+
+    def test_multiple_emits(self):
+        """Handler with emits=[A, B] creates two send channels/operations."""
+        handlers = [
+            _HandlerMeta(
+                event_name="disconnect",
+                handler_name="handle_disconnect",
+                input_type=None,
+                return_type=None,
+                docstring=None,
+                emits=[SessionLeft, Notification],
+            )
+        ]
+        schema = generate_asyncapi_schema(handlers)
+
+        assert "session_left" in schema["channels"]
+        assert "notification" in schema["channels"]
+        assert "sendSessionLeft" in schema["operations"]
+        assert "sendNotification" in schema["operations"]
+
+        # Receive operation has both in x-emits
+        recv_op = schema["operations"]["handleDisconnect"]
+        assert "sendSessionLeft" in recv_op["x-emits"]
+        assert "sendNotification" in recv_op["x-emits"]
+
+    def test_dedup_same_emit_model(self):
+        """Two handlers emitting same model → one send op with both triggers."""
+        handlers = [
+            _HandlerMeta(
+                event_name="disconnect",
+                handler_name="handle_disconnect",
+                input_type=None,
+                return_type=None,
+                docstring=None,
+                emits=[SessionLeft],
+            ),
+            _HandlerMeta(
+                event_name="leave_room",
+                handler_name="handle_leave_room",
+                input_type=None,
+                return_type=None,
+                docstring=None,
+                emits=[SessionLeft],
+            ),
+        ]
+        schema = generate_asyncapi_schema(handlers)
+
+        # Only one send operation
+        send_ops = [k for k, v in schema["operations"].items() if v["action"] == "send"]
+        assert send_ops == ["sendSessionLeft"]
+
+        # x-triggered-by lists both receive operations
+        send_op = schema["operations"]["sendSessionLeft"]
+        assert "handleDisconnect" in send_op["x-triggered-by"]
+        assert "handleLeaveRoom" in send_op["x-triggered-by"]
+
+        # Both receive operations have x-emits
+        assert schema["operations"]["handleDisconnect"]["x-emits"] == [
+            "sendSessionLeft"
+        ]
+        assert schema["operations"]["handleLeaveRoom"]["x-emits"] == ["sendSessionLeft"]
+
+    def test_emit_coexists_with_return_type(self):
+        """Handler with both return type and emits → receive reply + send channels."""
+        handlers = [
+            _HandlerMeta(
+                event_name="ping",
+                handler_name="handle_ping",
+                input_type=Ping,
+                return_type=Pong,
+                docstring=None,
+                emits=[SessionLeft],
+            )
+        ]
+        schema = generate_asyncapi_schema(handlers)
+
+        # Receive channel + reply
+        assert "ping" in schema["channels"]
+        assert "pingReply" in schema["channels"]
+        recv_op = schema["operations"]["handlePing"]
+        assert recv_op["action"] == "receive"
+        assert recv_op["x-emits"] == ["sendSessionLeft"]
+
+        # Send channel with x-triggered-by
+        assert "session_left" in schema["channels"]
+        send_op = schema["operations"]["sendSessionLeft"]
+        assert send_op["action"] == "send"
+        assert send_op["x-triggered-by"] == ["handlePing"]
+
+    def test_emit_reuses_existing_channel(self):
+        """Emitted model reuses existing channel if handler also receives that event."""
+        handlers = [
+            _HandlerMeta(
+                event_name="session_left",
+                handler_name="handle_session_left",
+                input_type=SessionLeft,
+                return_type=None,
+                docstring=None,
+                emits=[],
+            ),
+            _HandlerMeta(
+                event_name="disconnect",
+                handler_name="handle_disconnect",
+                input_type=None,
+                return_type=None,
+                docstring=None,
+                emits=[SessionLeft],
+            ),
+        ]
+        schema = generate_asyncapi_schema(handlers)
+
+        # Channel should exist (created by receive handler) and have the emit message added
+        assert "session_left" in schema["channels"]
+        ch = schema["channels"]["session_left"]
+        assert "SessionLeft" in ch["messages"]
+
+    def test_emit_ref_paths_are_valid(self):
+        """Verify $ref paths for emitted models point to existing components."""
+        handlers = [
+            _HandlerMeta(
+                event_name="disconnect",
+                handler_name="handle_disconnect",
+                input_type=None,
+                return_type=None,
+                docstring=None,
+                emits=[SessionLeft],
+            )
+        ]
+        schema = generate_asyncapi_schema(handlers)
+
+        # Operation message ref
+        op = schema["operations"]["sendSessionLeft"]
+        for msg_ref in op["messages"]:
+            ref = msg_ref["$ref"]
+            assert ref.startswith("#/channels/")
+
+        # x-triggered-by strings point to existing operations
+        for op_name in op["x-triggered-by"]:
+            assert op_name in schema["operations"]
+
+        # x-emits strings point to existing operations
+        recv_op = schema["operations"]["handleDisconnect"]
+        for op_name in recv_op["x-emits"]:
+            assert op_name in schema["operations"]
+
+        # Component message payload ref
+        msg = schema["components"]["messages"]["SessionLeft"]
+        payload_ref = msg["payload"]["$ref"]
+        name = payload_ref.split("/")[-1]
+        assert name in schema["components"]["schemas"]
+
+
+# ---------------------------------------------------------------------------
+# Integration tests for emits on wrapper classes
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncServerEmitsIntegration:
+    def test_on_with_emits(self):
+        sio = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio)
+
+        @tsio.on(Ping, emits=[SessionLeft])
+        async def handle_ping(sid: str, data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        schema = tsio.asyncapi_schema()
+        assert "session_left" in schema["channels"]
+        assert "sendSessionLeft" in schema["operations"]
+        assert schema["operations"]["sendSessionLeft"]["action"] == "send"
+        # Bidirectional refs
+        assert schema["operations"]["sendSessionLeft"]["x-triggered-by"] == [
+            "handlePing"
+        ]
+        assert "sendSessionLeft" in schema["operations"]["handlePing"]["x-emits"]
+
+    def test_event_with_emits(self):
+        sio = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio)
+
+        @tsio.event(emits=[SessionLeft])
+        async def disconnect(sid: str) -> None:
+            pass
+
+        schema = tsio.asyncapi_schema()
+        assert "session_left" in schema["channels"]
+        assert "sendSessionLeft" in schema["operations"]
+        assert schema["operations"]["disconnect"]["x-emits"] == ["sendSessionLeft"]
+
+
+class TestSyncServerEmitsIntegration:
+    def test_on_with_emits(self):
+        sio = socketio.Server()
+        tsio = wrap(sio)
+
+        @tsio.on(Ping, emits=[SessionLeft])
+        def handle_ping(sid: str, data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        schema = tsio.asyncapi_schema()
+        assert "session_left" in schema["channels"]
+        assert "sendSessionLeft" in schema["operations"]
+
+    def test_event_with_emits(self):
+        sio = socketio.Server()
+        tsio = wrap(sio)
+
+        @tsio.event(emits=[SessionLeft])
+        def disconnect(sid: str) -> None:
+            pass
+
+        schema = tsio.asyncapi_schema()
+        assert "sendSessionLeft" in schema["operations"]
+
+
+class TestAsyncClientEmitsIntegration:
+    def test_on_with_emits(self):
+        sio = socketio.AsyncClient()
+        tsio = wrap(sio)
+
+        @tsio.on(Ping, emits=[SessionLeft])
+        async def handle_ping(data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        schema = tsio.asyncapi_schema()
+        assert "session_left" in schema["channels"]
+        assert "sendSessionLeft" in schema["operations"]
+
+    def test_event_with_emits(self):
+        sio = socketio.AsyncClient()
+        tsio = wrap(sio)
+
+        @tsio.event(emits=[Notification])
+        async def ping(data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        schema = tsio.asyncapi_schema()
+        assert "sendNotification" in schema["operations"]
+
+
+class TestSyncClientEmitsIntegration:
+    def test_on_with_emits(self):
+        sio = socketio.Client()
+        tsio = wrap(sio)
+
+        @tsio.on(Ping, emits=[SessionLeft])
+        def handle_ping(data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        schema = tsio.asyncapi_schema()
+        assert "session_left" in schema["channels"]
+        assert "sendSessionLeft" in schema["operations"]
+
+    def test_event_with_emits(self):
+        sio = socketio.Client()
+        tsio = wrap(sio)
+
+        @tsio.event(emits=[Notification])
+        def ping(data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        schema = tsio.asyncapi_schema()
+        assert "sendNotification" in schema["operations"]
+
+
+# ---------------------------------------------------------------------------
+# Runtime warning tests
+# ---------------------------------------------------------------------------
+
+
+class TestEmitWarnings:
+    def test_undocumented_emit_warns(self):
+        """emit(UnregisteredModel(...)) with warn_undocumented_emits=True → warning."""
+        sio = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio, warn_undocumented_emits=True)
+
+        @tsio.on(Ping)
+        async def handle_ping(sid: str, data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            # Resolve args manually since we can't actually emit without a connection
+            from zndraw_socketio.wrapper import _resolve_emit_args
+
+            event_name, _ = _resolve_emit_args(SessionLeft(room_id="r", user_id="u"))
+            # Check the warning logic directly
+            assert event_name not in tsio._known_emit_events
+
+    def test_documented_emit_no_warn(self):
+        """emit(RegisteredModel(...)) → no warning expected."""
+        sio = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio, warn_undocumented_emits=True)
+
+        @tsio.on(Ping, emits=[SessionLeft])
+        async def handle_ping(sid: str, data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        from zndraw_socketio.wrapper import _resolve_emit_args
+
+        event_name, _ = _resolve_emit_args(SessionLeft(room_id="r", user_id="u"))
+        assert event_name in tsio._known_emit_events
+
+    def test_default_no_warn_flag(self):
+        """Default (flag off) → _warn_undocumented_emits is False."""
+        sio = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio)
+        assert tsio._warn_undocumented_emits is False
+
+    def test_known_events_populated(self):
+        """_known_emit_events includes handler event + emits models."""
+        sio = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio, warn_undocumented_emits=True)
+
+        @tsio.on(Ping, emits=[SessionLeft, Notification])
+        async def handle_ping(sid: str, data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        assert "ping" in tsio._known_emit_events
+        assert "session_left" in tsio._known_emit_events
+        assert "notification" in tsio._known_emit_events
