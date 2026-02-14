@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from pydantic import BaseModel
+
 
 @dataclass(frozen=True)
 class _DependsBase:
@@ -46,3 +48,22 @@ def Depends(  # noqa: N802
             ...
     """
     return _DependsBase(dependency=dependency, use_cache=use_cache)
+
+
+class Emits:
+    """Marker annotation declaring which socket events a REST endpoint emits.
+
+    Usage::
+
+        from zndraw_socketio import Emits
+
+        @router.put("/{key}/selection")
+        async def update_selection(
+            sio: Annotated[AsyncServerWrapper, Depends(tsio), Emits(ModelA, ModelB)],
+        ) -> StatusResponse:
+            await sio.emit(ModelA(...))
+            ...
+    """
+
+    def __init__(self, *models: type[BaseModel]) -> None:
+        self.models: tuple[type[BaseModel], ...] = models

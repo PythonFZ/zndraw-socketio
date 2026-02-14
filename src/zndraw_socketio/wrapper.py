@@ -46,7 +46,7 @@ from socketio import (
 )
 from typing_extensions import TypeForm
 
-from zndraw_socketio.asyncapi import _HandlerMeta, generate_asyncapi_schema
+from zndraw_socketio.asyncapi import _HandlerMeta, generate_asyncapi_schema, scan_routes
 
 try:
     from fastapi.params import Depends as _DependsClass
@@ -1229,11 +1229,18 @@ class AsyncServerWrapper:
         description: str | None = None,
     ) -> dict[str, Any]:
         """Generate an AsyncAPI 3.0 specification from registered handlers."""
+        rest_emitters = None
+        if self._app is not None:
+            rest_emitters = scan_routes(getattr(self._app, "routes", []))
+            for emitter in rest_emitters or []:
+                for m in emitter.emits:
+                    self._known_emit_events.add(get_event_name(m))
         return generate_asyncapi_schema(
             self._handler_registry,
             title=title,
             version=version,
             description=description,
+            rest_emitters=rest_emitters,
         )
 
 

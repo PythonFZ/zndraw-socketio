@@ -8,14 +8,16 @@ from typing import Annotated, Union
 import socketio
 from pydantic import BaseModel, Discriminator, Field
 
-from zndraw_socketio import wrap
+from zndraw_socketio import Emits, wrap
 from zndraw_socketio.asyncapi import (
     _extract_models,
     _HandlerMeta,
     _parse_docstring,
+    _RestEmitterMeta,
     _to_camel_case,
     _unwrap_annotated,
     generate_asyncapi_schema,
+    scan_routes,
 )
 
 # ---------------------------------------------------------------------------
@@ -791,3 +793,343 @@ class TestEmitWarnings:
         assert "ping" in tsio._known_emit_events
         assert "session_left" in tsio._known_emit_events
         assert "notification" in tsio._known_emit_events
+
+
+# ---------------------------------------------------------------------------
+# REST Emitter tests
+# ---------------------------------------------------------------------------
+
+
+class TestEmitsClass:
+    def test_construction_single(self):
+        e = Emits(SessionLeft)
+        assert e.models == (SessionLeft,)
+
+    def test_construction_multiple(self):
+        e = Emits(SessionLeft, Notification)
+        assert e.models == (SessionLeft, Notification)
+
+    def test_construction_empty(self):
+        e = Emits()
+        assert e.models == ()
+
+
+class _FakeRoute:
+    """Minimal duck-typed FastAPI route for testing scan_routes."""
+
+    def __init__(self, endpoint, methods=None, path="/"):
+        self.endpoint = endpoint
+        self.methods = methods or {"GET"}
+        self.path = path
+
+
+class TestScanRoutes:
+    def test_route_with_emits(self):
+        async def my_endpoint(
+            sio: Annotated[str, Emits(SessionLeft)],
+        ) -> None:
+            """Update selection."""
+
+        routes = [_FakeRoute(my_endpoint, methods={"PUT"}, path="/items/{id}")]
+        result = scan_routes(routes)
+        assert len(result) == 1
+        meta = result[0]
+        assert meta.handler_name == "my_endpoint"
+        assert meta.method == "PUT"
+        assert meta.path == "/items/{id}"
+        assert meta.summary == "Update selection."
+        assert meta.emits == [SessionLeft]
+
+    def test_route_with_multiple_emits(self):
+        async def my_endpoint(
+            sio: Annotated[str, Emits(SessionLeft, Notification)],
+        ) -> None:
+            pass
+
+        routes = [_FakeRoute(my_endpoint, methods={"POST"}, path="/notify")]
+        result = scan_routes(routes)
+        assert len(result) == 1
+        assert result[0].emits == [SessionLeft, Notification]
+
+    def test_route_without_emits(self):
+        async def plain_endpoint(x: int) -> None:
+            pass
+
+        routes = [_FakeRoute(plain_endpoint)]
+        result = scan_routes(routes)
+        assert result == []
+
+    def test_route_no_endpoint(self):
+        """Object without endpoint attr is skipped."""
+
+        class NoEndpoint:
+            pass
+
+        result = scan_routes([NoEndpoint()])
+        assert result == []
+
+    def test_multiple_methods_picks_sorted_first(self):
+        async def multi(sio: Annotated[str, Emits(Notification)]) -> None:
+            pass
+
+        routes = [_FakeRoute(multi, methods={"PUT", "PATCH"}, path="/x")]
+        result = scan_routes(routes)
+        assert result[0].method == "PATCH"  # sorted: PATCH < PUT
+
+
+class TestGenerateSchemaWithRestEmitters:
+    def test_rest_only_emit(self):
+        """REST-only emit creates send operation with x-rest-triggers only."""
+        rest_emitters = [
+            _RestEmitterMeta(
+                handler_name="update_selection",
+                method="PUT",
+                path="/{key}/selection",
+                summary="Update selection",
+                emits=[SessionLeft],
+            )
+        ]
+        schema = generate_asyncapi_schema([], rest_emitters=rest_emitters)
+
+        # Channel created
+        assert "session_left" in schema["channels"]
+        ch = schema["channels"]["session_left"]
+        assert ch["address"] == "session_left"
+        assert "SessionLeft" in ch["messages"]
+
+        # Send operation with x-rest-triggers
+        assert "sendSessionLeft" in schema["operations"]
+        op = schema["operations"]["sendSessionLeft"]
+        assert op["action"] == "send"
+        assert "x-triggered-by" not in op
+        assert len(op["x-rest-triggers"]) == 1
+        trigger = op["x-rest-triggers"][0]
+        assert trigger["operationId"] == "updateSelection"
+        assert trigger["method"] == "PUT"
+        assert trigger["path"] == "/{key}/selection"
+        assert trigger["summary"] == "Update selection"
+
+        # Components
+        assert "SessionLeft" in schema["components"]["schemas"]
+        assert "SessionLeft" in schema["components"]["messages"]
+
+    def test_rest_trigger_no_summary(self):
+        """REST trigger without summary omits the key."""
+        rest_emitters = [
+            _RestEmitterMeta(
+                handler_name="delete_item",
+                method="DELETE",
+                path="/items/{id}",
+                summary=None,
+                emits=[Notification],
+            )
+        ]
+        schema = generate_asyncapi_schema([], rest_emitters=rest_emitters)
+        trigger = schema["operations"]["sendNotification"]["x-rest-triggers"][0]
+        assert "summary" not in trigger
+
+    def test_mixed_socket_and_rest(self):
+        """Same model emitted from socket handler and REST → both annotations."""
+        handlers = [
+            _HandlerMeta(
+                event_name="disconnect",
+                handler_name="handle_disconnect",
+                input_type=None,
+                return_type=None,
+                docstring=None,
+                emits=[SessionLeft],
+            )
+        ]
+        rest_emitters = [
+            _RestEmitterMeta(
+                handler_name="update_selection",
+                method="PUT",
+                path="/selection",
+                summary="Update selection",
+                emits=[SessionLeft],
+            )
+        ]
+        schema = generate_asyncapi_schema(handlers, rest_emitters=rest_emitters)
+
+        op = schema["operations"]["sendSessionLeft"]
+        assert op["action"] == "send"
+        assert "handleDisconnect" in op["x-triggered-by"]
+        assert len(op["x-rest-triggers"]) == 1
+        assert op["x-rest-triggers"][0]["operationId"] == "updateSelection"
+
+    def test_multiple_rest_emitters_same_model(self):
+        """Two REST endpoints emitting same model → both in x-rest-triggers."""
+        rest_emitters = [
+            _RestEmitterMeta(
+                handler_name="endpoint_a",
+                method="POST",
+                path="/a",
+                summary=None,
+                emits=[SessionLeft],
+            ),
+            _RestEmitterMeta(
+                handler_name="endpoint_b",
+                method="PUT",
+                path="/b",
+                summary=None,
+                emits=[SessionLeft],
+            ),
+        ]
+        schema = generate_asyncapi_schema([], rest_emitters=rest_emitters)
+
+        op = schema["operations"]["sendSessionLeft"]
+        assert len(op["x-rest-triggers"]) == 2
+        ids = [t["operationId"] for t in op["x-rest-triggers"]]
+        assert "endpointA" in ids
+        assert "endpointB" in ids
+
+    def test_rest_emit_reuses_existing_channel(self):
+        """REST emit model matches existing receive channel → reused."""
+        handlers = [
+            _HandlerMeta(
+                event_name="session_left",
+                handler_name="handle_session_left",
+                input_type=SessionLeft,
+                return_type=None,
+                docstring=None,
+            )
+        ]
+        rest_emitters = [
+            _RestEmitterMeta(
+                handler_name="kick_user",
+                method="POST",
+                path="/kick",
+                summary=None,
+                emits=[SessionLeft],
+            )
+        ]
+        schema = generate_asyncapi_schema(handlers, rest_emitters=rest_emitters)
+
+        # Only one session_left channel
+        assert "session_left" in schema["channels"]
+        assert "SessionLeft" in schema["channels"]["session_left"]["messages"]
+
+    def test_ref_paths_valid_with_rest(self):
+        """All $ref paths valid when REST emitters are present."""
+        rest_emitters = [
+            _RestEmitterMeta(
+                handler_name="update_sel",
+                method="PUT",
+                path="/sel",
+                summary="Update",
+                emits=[SessionLeft],
+            )
+        ]
+        schema = generate_asyncapi_schema([], rest_emitters=rest_emitters)
+
+        op = schema["operations"]["sendSessionLeft"]
+        for msg_ref in op["messages"]:
+            ref = msg_ref["$ref"]
+            assert ref.startswith("#/channels/")
+
+        msg = schema["components"]["messages"]["SessionLeft"]
+        payload_ref = msg["payload"]["$ref"]
+        name = payload_ref.split("/")[-1]
+        assert name in schema["components"]["schemas"]
+
+
+# ---------------------------------------------------------------------------
+# Integration: Full FastAPI app with Emits + AsyncServerWrapper
+# ---------------------------------------------------------------------------
+
+
+class TestRestEmitsIntegration:
+    def test_full_fastapi_integration(self):
+        """AsyncServerWrapper.asyncapi_schema() auto-discovers REST Emits."""
+        from fastapi import FastAPI
+
+        sio_raw = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio_raw)
+
+        app = FastAPI()
+        tsio.app = app
+
+        # Note: Emits(SessionLeft) is all scan_routes needs.
+        # Depends(tsio) is omitted because from __future__ import annotations
+        # makes annotations lazy strings, and tsio isn't in module globals.
+        @app.put("/rooms/{room_id}/selection")
+        async def update_selection(
+            sio: Annotated[object, Emits(SessionLeft)],
+            room_id: str,
+        ) -> dict:
+            """Update room selection."""
+            return {"status": "ok"}
+
+        schema = tsio.asyncapi_schema(title="Integration Test")
+
+        assert "session_left" in schema["channels"]
+        assert "sendSessionLeft" in schema["operations"]
+        op = schema["operations"]["sendSessionLeft"]
+        assert op["action"] == "send"
+        assert len(op["x-rest-triggers"]) == 1
+        trigger = op["x-rest-triggers"][0]
+        assert trigger["operationId"] == "updateSelection"
+        assert trigger["method"] == "PUT"
+        assert trigger["path"] == "/rooms/{room_id}/selection"
+        assert trigger["summary"] == "Update room selection."
+
+    def test_mixed_socket_and_rest_integration(self):
+        """Both socket handler and REST emit same model → combined."""
+        from fastapi import FastAPI
+
+        sio_raw = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio_raw)
+
+        @tsio.on(Ping, emits=[SessionLeft])
+        async def handle_ping(sid: str, data: Ping) -> Pong:
+            return Pong(reply=data.message)
+
+        app = FastAPI()
+        tsio.app = app
+
+        @app.post("/kick")
+        async def kick_user(
+            sio: Annotated[object, Emits(SessionLeft)],
+        ) -> dict:
+            """Kick a user."""
+            return {"status": "ok"}
+
+        schema = tsio.asyncapi_schema()
+
+        op = schema["operations"]["sendSessionLeft"]
+        assert "handlePing" in op["x-triggered-by"]
+        assert len(op["x-rest-triggers"]) == 1
+        assert op["x-rest-triggers"][0]["operationId"] == "kickUser"
+
+    def test_rest_emits_populate_known_events(self):
+        """REST Emits models are added to _known_emit_events on schema gen."""
+        from fastapi import FastAPI
+
+        sio_raw = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio_raw, warn_undocumented_emits=True)
+
+        app = FastAPI()
+        tsio.app = app
+
+        @app.post("/notify")
+        async def notify(
+            sio: Annotated[object, Emits(Notification)],
+        ) -> dict:
+            return {"status": "ok"}
+
+        # Before schema generation, event is unknown
+        assert "notification" not in tsio._known_emit_events
+
+        tsio.asyncapi_schema()
+
+        # After schema generation, event is known
+        assert "notification" in tsio._known_emit_events
+
+    def test_no_app_no_rest_emitters(self):
+        """No app set → no REST emitters in schema."""
+        sio_raw = socketio.AsyncServer(async_mode="asgi")
+        tsio = wrap(sio_raw)
+        # app not set
+        schema = tsio.asyncapi_schema()
+        assert schema["channels"] == {}
+        assert schema["operations"] == {}

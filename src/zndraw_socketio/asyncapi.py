@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel
+
+from zndraw_socketio.params import Emits
 
 
 @dataclass
@@ -17,6 +19,15 @@ class _HandlerMeta:
     return_type: Any  # raw type hint (may be Union, Annotated, etc.)
     docstring: str | None  # handler function docstring
     emits: list[type[BaseModel]] = field(default_factory=list)  # side-effect events
+
+
+@dataclass
+class _RestEmitterMeta:
+    handler_name: str  # function name
+    method: str  # HTTP method (GET, POST, PUT, etc.)
+    path: str  # route path
+    summary: str | None  # endpoint docstring first line
+    emits: list[type[BaseModel]] = field(default_factory=list)  # socket models emitted
 
 
 def _get_event_name(model: type[BaseModel]) -> str:
@@ -116,11 +127,57 @@ def _add_model_to_components(
     }
 
 
+def scan_routes(routes: list[Any]) -> list[_RestEmitterMeta]:
+    """Scan FastAPI-style routes for Emits annotations.
+
+    For each route whose endpoint has an ``Annotated[..., Emits(...)]`` parameter,
+    returns a ``_RestEmitterMeta`` with the route metadata and emitted models.
+    """
+    results: list[_RestEmitterMeta] = []
+    for route in routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        try:
+            hints = get_type_hints(endpoint, include_extras=True)
+        except Exception:
+            continue
+
+        emitted: list[type[BaseModel]] = []
+        for hint in hints.values():
+            if get_origin(hint) is not Annotated:
+                continue
+            for metadata in get_args(hint)[1:]:
+                if isinstance(metadata, Emits):
+                    emitted.extend(metadata.models)
+
+        if not emitted:
+            continue
+
+        methods = getattr(route, "methods", None) or set()
+        method = next(iter(sorted(methods)), "GET")
+        path = getattr(route, "path", "")
+        doc = endpoint.__doc__
+        summary, _ = _parse_docstring(doc)
+
+        results.append(
+            _RestEmitterMeta(
+                handler_name=endpoint.__name__,
+                method=method,
+                path=path,
+                summary=summary,
+                emits=emitted,
+            )
+        )
+    return results
+
+
 def generate_asyncapi_schema(
     handlers: list[_HandlerMeta],
     title: str = "Socket.IO API",
     version: str = "1.0.0",
     description: str | None = None,
+    rest_emitters: list[_RestEmitterMeta] | None = None,
 ) -> dict[str, Any]:
     """Generate an AsyncAPI 3.0.0 specification from handler metadata."""
     channels: dict[str, Any] = {}
@@ -243,6 +300,56 @@ def generate_asyncapi_schema(
                 operations[op].setdefault("x-emits", [])
                 if send_op_name not in operations[op]["x-emits"]:
                     operations[op]["x-emits"].append(send_op_name)
+
+    # --- Process REST emitters → x-rest-triggers on send operations ---
+    if rest_emitters:
+        # Map: emit model class → list of REST trigger dicts
+        rest_model_triggers: dict[type, list[dict[str, Any]]] = {}
+        for emitter in rest_emitters:
+            trigger_info: dict[str, Any] = {
+                "operationId": _to_camel_case(emitter.handler_name),
+                "method": emitter.method,
+                "path": emitter.path,
+            }
+            if emitter.summary:
+                trigger_info["summary"] = emitter.summary
+            for model in emitter.emits:
+                rest_model_triggers.setdefault(model, []).append(trigger_info)
+
+        for model, triggers in rest_model_triggers.items():
+            emit_event = _get_event_name(model)
+            name = model.__name__
+            send_op_name = f"send{name}"
+
+            # Ensure components exist
+            _add_model_to_components(
+                model, name, component_schemas, component_messages
+            )
+
+            # Ensure channel exists
+            if emit_event not in channels:
+                channels[emit_event] = {
+                    "address": emit_event,
+                    "messages": {name: {"$ref": f"#/components/messages/{name}"}},
+                }
+            else:
+                ch_msgs = channels[emit_event]["messages"]
+                if name not in ch_msgs:
+                    ch_msgs[name] = {"$ref": f"#/components/messages/{name}"}
+
+            # Create or update send operation
+            if send_op_name not in operations:
+                operations[send_op_name] = {
+                    "action": "send",
+                    "channel": {"$ref": f"#/channels/{emit_event}"},
+                    "messages": [
+                        {"$ref": f"#/channels/{emit_event}/messages/{name}"}
+                    ],
+                }
+
+            operations[send_op_name].setdefault("x-rest-triggers", []).extend(
+                triggers
+            )
 
     # --- Assemble top-level spec ---
     info: dict[str, Any] = {"title": title, "version": version}

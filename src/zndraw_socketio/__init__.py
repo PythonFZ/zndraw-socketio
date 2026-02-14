@@ -29,6 +29,8 @@ from .wrapper import (
     wrap as wrap,
 )
 
+from .params import Emits as Emits
+
 try:
     from fastapi import Depends as Depends
 except ImportError:
