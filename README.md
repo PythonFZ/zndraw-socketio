@@ -70,6 +70,27 @@ async def handle_disconnect(sid: str) -> None:
 
 These appear as `action: "send"` operations in the generated AsyncAPI schema.
 
+### REST Endpoint Emits
+REST endpoints can also declare socket event emissions using the `Emits` annotation. These are auto-discovered when `tsio.app` is set and appear as `x-rest-triggers` in the AsyncAPI schema.
+
+```python
+from typing import Annotated
+from fastapi import Depends, FastAPI
+from zndraw_socketio import Emits, AsyncServerWrapper, wrap
+
+app = FastAPI()
+tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
+tsio.app = app
+
+@app.put("/{key}/selection")
+async def update_selection(
+    sio: Annotated[AsyncServerWrapper, Depends(tsio), Emits(SessionLeft)],
+    key: str,
+) -> dict:
+    await sio.emit(SessionLeft(room_id=key, user_id="..."), room=key)
+    return {"status": "ok"}
+```
+
 ## AsyncAPI Schema Generation
 Generate an AsyncAPI 3.0 specification from registered handlers:
 
