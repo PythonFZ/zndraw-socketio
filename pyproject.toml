@@ -1,6 +1,6 @@
 [project]
 name = "zndraw-socketio"
-version = "0.1.4"
+version = "0.1.5"
 description = "Typed wrapper for python-socketio with Pydantic validation and dependency injection."
 readme = "README.md"
 authors = [
