@@ -322,9 +322,7 @@ def generate_asyncapi_schema(
             send_op_name = f"send{name}"
 
             # Ensure components exist
-            _add_model_to_components(
-                model, name, component_schemas, component_messages
-            )
+            _add_model_to_components(model, name, component_schemas, component_messages)
 
             # Ensure channel exists
             if emit_event not in channels:
@@ -342,14 +340,10 @@ def generate_asyncapi_schema(
                 operations[send_op_name] = {
                     "action": "send",
                     "channel": {"$ref": f"#/channels/{emit_event}"},
-                    "messages": [
-                        {"$ref": f"#/channels/{emit_event}/messages/{name}"}
-                    ],
+                    "messages": [{"$ref": f"#/channels/{emit_event}/messages/{name}"}],
                 }
 
-            operations[send_op_name].setdefault("x-rest-triggers", []).extend(
-                triggers
-            )
+            operations[send_op_name].setdefault("x-rest-triggers", []).extend(triggers)
 
     # --- Assemble top-level spec ---
     info: dict[str, Any] = {"title": title, "version": version}
