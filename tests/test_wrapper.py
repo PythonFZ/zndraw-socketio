@@ -480,7 +480,7 @@ class TestReturnValueValidation:
 
 
 class TestPassthrough:
-    """Tests for __getattr__ passthrough."""
+    """Tests for __getattr__ and __setattr__ passthrough."""
 
     def test_passthrough_attributes(self, sync_client_wrapper, mock_sync_client):
         """Test that unknown attributes are passed through."""
@@ -501,3 +501,40 @@ class TestPassthrough:
 
         simple_client_wrapper.disconnect()
         mock_simple_client.disconnect.assert_called_once()
+
+    def test_setattr_forwards_to_sio(self):
+        """Test that setting an attribute on a wrapper forwards to _sio."""
+        sio = socketio.AsyncServer(async_mode="asgi")
+        wrapper = AsyncServerWrapper(sio)
+        sentinel = object()
+        wrapper.manager = sentinel
+        assert sio.manager is sentinel
+
+    def test_setattr_forwards_sync_server(self):
+        """Test that setting an attribute on SyncServerWrapper forwards to _sio."""
+        sio = socketio.Server()
+        wrapper = SyncServerWrapper(sio)
+        sentinel = object()
+        wrapper.manager = sentinel
+        assert sio.manager is sentinel
+
+    def test_setattr_wrapper_own_attrs_stay_local(self):
+        """Test that wrapper-internal attributes are not forwarded to _sio."""
+        sio = socketio.AsyncServer(async_mode="asgi")
+        wrapper = AsyncServerWrapper(sio)
+        # _handler_registry is a wrapper-own attribute, not on _sio
+        wrapper._handler_registry = []
+        assert wrapper._handler_registry == []
+        assert not hasattr(sio, "_handler_registry")
+
+    def test_setattr_new_attr_on_sio(self):
+        """Test that setting an attr that exists on _sio updates _sio."""
+        sio = socketio.AsyncServer(async_mode="asgi")
+        wrapper = AsyncServerWrapper(sio)
+        original_logger = sio.logger
+        import logging
+
+        new_logger = logging.getLogger("test")
+        wrapper.logger = new_logger
+        assert sio.logger is new_logger
+        assert sio.logger is not original_logger
