@@ -616,6 +616,13 @@ class AsyncClientWrapper:
     def app(self, value: Any) -> None:
         self._app = value
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Forward attribute writes to the underlying socketio instance."""
+        if name.startswith("_") or not hasattr(self._sio, name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._sio, name, value)
+
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
         return getattr(self._sio, name)
@@ -894,6 +901,13 @@ class AsyncServerWrapper:
     @app.setter
     def app(self, value: Any) -> None:
         self._app = value
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Forward attribute writes to the underlying socketio instance."""
+        if name.startswith("_") or not hasattr(self._sio, name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._sio, name, value)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
@@ -1268,6 +1282,13 @@ class SyncClientWrapper:
         self._known_emit_events: set[str] = set()
         self._warn_undocumented_emits = warn_undocumented_emits
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Forward attribute writes to the underlying socketio instance."""
+        if name.startswith("_") or not hasattr(self._sio, name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._sio, name, value)
+
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
         return getattr(self._sio, name)
@@ -1486,6 +1507,13 @@ class AsyncSimpleClientWrapper:
         """
         self._sio = sio
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Forward attribute writes to the underlying socketio instance."""
+        if name.startswith("_") or not hasattr(self._sio, name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._sio, name, value)
+
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
         return getattr(self._sio, name)
@@ -1653,6 +1681,13 @@ class SimpleClientWrapper:
         """
         self._sio = sio
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Forward attribute writes to the underlying socketio instance."""
+        if name.startswith("_") or not hasattr(self._sio, name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._sio, name, value)
+
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
         return getattr(self._sio, name)
@@ -1809,6 +1844,13 @@ class SyncServerWrapper:
         self._handler_registry: list[_HandlerMeta] = []
         self._known_emit_events: set[str] = set()
         self._warn_undocumented_emits = warn_undocumented_emits
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Forward attribute writes to the underlying socketio instance."""
+        if name.startswith("_") or not hasattr(self._sio, name):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._sio, name, value)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to the underlying socketio instance."""
