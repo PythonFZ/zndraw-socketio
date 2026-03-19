@@ -1,6 +1,6 @@
 [project]
 name = "zndraw-socketio"
-version = "0.1.5"
+dynamic = ["version"]
 description = "Typed wrapper for python-socketio with Pydantic validation and dependency injection."
 readme = "README.md"
 authors = [
@@ -28,8 +28,14 @@ asyncio-client = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/zndraw_socketio/_version.py"
 
 [dependency-groups]
 dev = [

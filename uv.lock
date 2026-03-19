@@ -2346,7 +2346,6 @@ wheels = [
 
 [[package]]
 name = "zndraw-socketio"
-version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -2383,7 +2382,7 @@ requires-dist = [
     { name = "python-socketio", extras = ["client"], marker = "extra == 'client'", specifier = ">=5.12.1" },
     { name = "typing-extensions", specifier = ">=4.13.0" },
 ]
-provides-extras = ["client", "asyncio-client"]
+provides-extras = ["asyncio-client", "client"]
 
 [package.metadata.requires-dev]
 dev = [

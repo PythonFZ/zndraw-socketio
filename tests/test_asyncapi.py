@@ -752,7 +752,7 @@ class TestEmitWarnings:
         async def handle_ping(sid: str, data: Ping) -> Pong:
             return Pong(reply=data.message)
 
-        with warnings.catch_warnings(record=True) as w:
+        with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
             # Resolve args manually since we can't actually emit without a connection
             from zndraw_socketio.wrapper import _resolve_emit_args
