@@ -82,7 +82,7 @@ class TestExtractModels:
         assert result == [Pong]
 
     def test_annotated_union(self):
-        t = Annotated[Union[Error, Success], Discriminator("kind")]
+        t = Annotated[Error | Success, Discriminator("kind")]
         result = _extract_models(t)
         assert set(result) == {Error, Success}
 
@@ -237,7 +237,7 @@ class TestGenerateSchema:
 
     def test_annotated_discriminated_union_output(self):
         """Handler returning Annotated discriminated union."""
-        ResponseType = Annotated[Union[Error, Success], Discriminator("kind")]
+        ResponseType = Annotated[Error | Success, Discriminator("kind")]
         handlers = [
             _HandlerMeta(
                 event_name="process",
