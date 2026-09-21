@@ -1,8 +1,9 @@
 """Tests for Request auto-injection and generator dependencies."""
 
+from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Annotated, AsyncIterator
+from typing import Annotated
 
 import pytest
 import socketio
@@ -272,7 +273,7 @@ async def test_resolve_async_generator():
 @pytest.mark.asyncio
 async def test_resolve_sync_generator():
     """Sync generator deps yield value and cleanup runs on stack exit."""
-    from typing import Iterator
+    from collections.abc import Iterator
 
     closed = False
 

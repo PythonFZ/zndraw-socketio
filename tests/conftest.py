@@ -2,7 +2,8 @@
 
 import asyncio
 import socket
-from typing import Any, AsyncGenerator, ClassVar, Literal
+from collections.abc import AsyncGenerator
+from typing import Any, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
