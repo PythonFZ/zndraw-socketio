@@ -14,6 +14,7 @@ sio = wrap(socketio.AsyncClient())  # or AsyncServer, Client, Server, etc.
 class Ping(BaseModel):
     message: str
 
+
 # kwargs are passed to socketio's emit method
 # emits {"message": "Hello, World!"} to "ping"
 await sio.emit(Ping(message="Hello, World!"), **kwargs)
@@ -27,6 +28,7 @@ await sio.emit("event", {"payload": ...})
 ```python
 class Pong(BaseModel):
     reply: str
+
 
 # emits {"message": "Hello, World!"} to "ping" and receives Pong(reply=...) in return
 response = await sio.call(Ping(message="Hello, World!"), response_model=Pong)
@@ -45,9 +47,11 @@ Handlers are registered with `@sio.on()` or `@sio.event` and get automatic Pydan
 ```python
 tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
 
+
 @tsio.on(Ping)
 async def handle_ping(sid: str, data: Ping) -> Pong:
     return Pong(reply=data.message)
+
 
 # or use the function name as the event name
 @tsio.event
@@ -62,6 +66,7 @@ Handlers that emit events to other channels can declare them with `emits`:
 class SessionLeft(BaseModel):
     room_id: str
     user_id: str
+
 
 @tsio.on("disconnect", emits=[SessionLeft])
 async def handle_disconnect(sid: str) -> None:
@@ -81,6 +86,7 @@ from zndraw_socketio import Emits, AsyncServerWrapper, wrap
 app = FastAPI()
 tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
 tsio.app = app
+
 
 @app.put("/{key}/selection")
 async def update_selection(
@@ -102,8 +108,8 @@ schema = tsio.asyncapi_schema(title="My API", version="1.0.0")
 By default, the event name is the class name in snake_case. You can customize it by setting the `event_name` attribute.
 
 ```python
-class CustomEvent(BaseModel):
-    ...
+class CustomEvent(BaseModel): ...
+
 
 get_event_name(CustomEvent) == "custom_event"
 ```
@@ -112,6 +118,7 @@ You can override it like this:
 
 ```python
 from typing import ClassVar
+
 
 class CustomEvent(BaseModel):
     event_name: ClassVar[str] = "my_custom_event"
@@ -124,10 +131,13 @@ Handlers support FastAPI-style `Depends()` for dependency injection.
 from typing import Annotated
 from zndraw_socketio import wrap, Depends
 
+
 async def get_redis() -> Redis:
     return Redis()
 
+
 RedisDep = Annotated[Redis, Depends(get_redis)]
+
 
 @tsio.on(Ping)
 async def handle(sid: str, data: Ping, redis: RedisDep) -> Pong:
@@ -144,12 +154,16 @@ from fastapi import FastAPI, Request
 app = FastAPI()
 tsio = wrap(socketio.AsyncServer(async_mode="asgi"))
 
+
 def get_db(request: Request) -> Database:
     return request.app.state.db
 
+
 @tsio.on(Ping)
-async def handle(sid: str, data: Ping, db: Annotated[Database, Depends(get_db)]) -> Pong:
-    ...
+async def handle(
+    sid: str, data: Ping, db: Annotated[Database, Depends(get_db)]
+) -> Pong: ...
+
 
 # Set app later — e.g. in a lifespan, after handler registration
 tsio.app = app
@@ -160,6 +174,7 @@ Server wrappers support exception handlers similar to FastAPI.
 
 ```python
 from zndraw_socketio import EventContext
+
 
 @tsio.exception_handler(ValueError)
 async def handle_error(ctx: EventContext, exc: ValueError):
@@ -175,6 +190,7 @@ You might want to return `Response | ErrorResponse` from an event handler.
 ```python
 class ProblemDetail(BaseModel):
     """RFC 9457 Problem Details."""
+
     kind: Literal["error"] = "error"
     type: str = "about:blank"
     title: str
@@ -182,12 +198,15 @@ class ProblemDetail(BaseModel):
     detail: str | None = None
     instance: str | None = None
 
+
 class Response(BaseModel):
     kind: Literal["response"] = "response"
     data: str
 
+
 class ServerRequest(BaseModel):
     query: str
+
 
 response = await sio.call(
     ServerRequest(query="..."),
