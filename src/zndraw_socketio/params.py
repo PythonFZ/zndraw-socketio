@@ -6,8 +6,9 @@ When FastAPI is installed, its Depends is used directly instead.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -19,12 +20,12 @@ class _DependsBase:
     Use the :func:`Depends` function instead of instantiating directly.
     """
 
-    dependency: Optional[Callable[..., Any]] = None
+    dependency: Callable[..., Any] | None = None
     use_cache: bool = True
 
 
-def Depends(  # noqa: N802
-    dependency: Optional[Callable[..., Any]] = None,
+def Depends(
+    dependency: Callable[..., Any] | None = None,
     *,
     use_cache: bool = True,
 ) -> Any:
