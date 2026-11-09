@@ -18,15 +18,13 @@ import asyncio
 import inspect
 import re
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from typing import (
     Annotated,
     Any,
-    Callable,
-    Type,
     TypeVar,
     get_args,
     get_origin,
@@ -115,7 +113,7 @@ class EventContext:
     event: str
     namespace: str
     data: Any
-    sio: "AsyncServerWrapper"
+    sio: AsyncServerWrapper
 
 
 class SioRequest:
@@ -133,7 +131,7 @@ class SioRequest:
     ``{}`` for cookies).
     """
 
-    __slots__ = ("app", "_environ", "auth")
+    __slots__ = ("_environ", "app", "auth")
 
     def __init__(
         self,
@@ -229,7 +227,7 @@ class SioRequest:
 # =============================================================================
 
 
-def get_event_name(model: Type[BaseModel] | BaseModel) -> str:
+def get_event_name(model: type[BaseModel] | BaseModel) -> str:
     """Get event name from a Pydantic model class or instance.
 
     Checks for an `event_name` class attribute first, then falls back to
@@ -725,7 +723,7 @@ class AsyncClientWrapper:
 
     def on(
         self,
-        event: str | Type[BaseModel],
+        event: str | type[BaseModel],
         handler: Callable | None = None,
         emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,
@@ -1103,7 +1101,7 @@ class AsyncServerWrapper:
 
     def on(
         self,
-        event: str | Type[BaseModel],
+        event: str | type[BaseModel],
         handler: Callable | None = None,
         emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,
@@ -1390,7 +1388,7 @@ class SyncClientWrapper:
 
     def on(
         self,
-        event: str | Type[BaseModel],
+        event: str | type[BaseModel],
         handler: Callable | None = None,
         emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,
@@ -1954,7 +1952,7 @@ class SyncServerWrapper:
 
     def on(
         self,
-        event: str | Type[BaseModel],
+        event: str | type[BaseModel],
         handler: Callable | None = None,
         emits: Sequence[type[BaseModel]] | None = None,
         **kwargs: Any,

@@ -1,5 +1,5 @@
 from pprint import pprint
-from typing import Literal, Union
+from typing import Literal
 
 import socketio
 from pydantic import BaseModel
@@ -26,7 +26,7 @@ tsio = wrap(sio)
 
 
 @tsio.on(Model)
-async def handle_ping(sid: str, data: Model) -> Union[A, B]:
+async def handle_ping(sid: str, data: Model) -> A | B:
     """Health check."""
     if data.name == "A":
         return A(type="A", value=42)
