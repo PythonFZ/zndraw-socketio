@@ -46,18 +46,26 @@ for p in params:
 
 input_type = data_param[1] if data_param else None
 
+
 # Unwrap Annotated before checking for Union
 def _unwrap(t):
     if get_origin(t) is Annotated:
         t = get_args(t)[0]
     return t
 
+
 raw = _unwrap(input_type) if input_type else None
 input_models = get_args(raw) if get_origin(raw) is Union else [raw] if raw else []
 
 # Output: return annotation (same unwrap logic)
 return_type = _unwrap(hints.get("return"))
-output_models = get_args(return_type) if get_origin(return_type) is Union else [return_type] if return_type else []
+output_models = (
+    get_args(return_type)
+    if get_origin(return_type) is Union
+    else [return_type]
+    if return_type
+    else []
+)
 # Filter out NoneType from unions (e.g. Optional[Pong])
 output_models = [m for m in output_models if m is not type(None)]
 ```
@@ -72,9 +80,9 @@ Non-BaseModel types (`str`, `dict`, `None`) map to plain JSON Schema types.
 class _HandlerMeta:
     event_name: str
     handler_name: str
-    input_type: Any             # raw type hint (may be Union, Annotated, etc.)
-    return_type: Any            # raw type hint (may be Union, Annotated, etc.)
-    docstring: str | None       # handler function docstring
+    input_type: Any  # raw type hint (may be Union, Annotated, etc.)
+    return_type: Any  # raw type hint (may be Union, Annotated, etc.)
+    docstring: str | None  # handler function docstring
     emits: list[type[BaseModel]]  # side-effect events emitted by handler
 ```
 
